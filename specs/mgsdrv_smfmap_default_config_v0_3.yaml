@@ -1,0 +1,231 @@
+version: 0.3
+profile_name: default-smfmap
+
+smf:
+  type: 1
+  ppq: 3600
+  program_numbering: zero_based
+  channel_numbering: zero_based
+  channel_allocation:
+    policy: one_source_track_per_channel
+    overflow_policy: error
+    rhythm_channel_zero_based: 9
+  event_order:
+    - note_off
+    - bank_select
+    - program_change
+    - rpn_nrpn
+    - cc
+    - pitch_bend
+    - initial_expression
+    - meta
+    - note_on
+    - envelope_curve
+
+manual_smf:
+  enabled: true
+  comment_prefix: ";@smf"
+  unknown_command_policy: error
+
+tracks:
+  "1": { family: psg,       midi_channel: 0,  at_command_policy: psg_envelope }
+  "2": { family: psg,       midi_channel: 1,  at_command_policy: psg_envelope }
+  "3": { family: psg_noise, midi_channel: 2,  at_command_policy: psg_envelope_or_drum }
+  "4": { family: scc,       midi_channel: 3,  at_command_policy: tone_map }
+  "5": { family: scc,       midi_channel: 4,  at_command_policy: tone_map }
+  "6": { family: scc,       midi_channel: 5,  at_command_policy: tone_map }
+  "7": { family: scc,       midi_channel: 6,  at_command_policy: tone_map }
+  "8": { family: scc,       midi_channel: 7,  at_command_policy: tone_map }
+  # Common project profile: OPLL uses 9,a,b.
+  # Full MGSDRV opll_mode 0 can expose more OPLL tracks than one MIDI port can
+  # safely isolate; use --emit-config-skeleton or multi_port for c..h when needed.
+  "9": { family: opll,      midi_channel: 8,  at_command_policy: tone_map }
+  "a": { family: opll,      midi_channel: 10, at_command_policy: tone_map }
+  "b": { family: opll,      midi_channel: 11, at_command_policy: tone_map }
+
+at_command_dispatch:
+  psg:
+    "@":  { action: select_psg_envelope }
+    "@e": { action: select_psg_envelope }
+    "@r": { action: select_psg_envelope }
+  psg_noise:
+    "@":  { action: select_psg_envelope, allow_drum_map: true }
+    "@e": { action: select_psg_envelope, allow_drum_map: true }
+    "@r": { action: select_psg_envelope, allow_drum_map: true }
+  scc:
+    "@":  { action: select_tone }
+    "@e": { action: apply_envelope_to_current_tone }
+    "@r": { action: apply_envelope_to_current_tone }
+  opll:
+    "@":  { action: select_tone }
+    "@e": { action: apply_envelope_to_current_tone }
+    "@r": { action: apply_envelope_to_current_tone }
+
+psg_envelope_map:
+  enabled: true
+  undefined_policy: warn_and_no_envelope
+  default:
+    source: mus_definition
+    emit_expression_cc: true
+    expression_cc: 11
+    trigger:
+      on_at_command: select_only
+      on_note_on: restart_envelope
+    volume_scale:
+      mgsc_min: 0
+      mgsc_max: 15
+      midi_min: 0
+      midi_max: 127
+      curve: linear
+    loop_policy:
+      finite_note_duration: render_until_note_off
+      infinite_envelope_loop: render_until_note_off
+    mode_noise_policy:
+      tone_only: ignore
+      noise_only: report
+      tone_and_noise: report
+      emit_meta_text: true
+  envelopes: {}
+
+psg_noise_map:
+  enabled: true
+  default_action: envelope_cc
+  report_mode_noise: true
+  drum_map:
+    enabled: false
+    trigger: on_note_on
+    channel: 9
+    envelopes:
+      # Enable per song if PSG3/noise should become GM drums.
+      # "20": { name: noise_kick,  note: 36, velocity_from_envelope_peak: true }
+      # "21": { name: noise_snare, note: 38, velocity_from_envelope_peak: true }
+      # "22": { name: noise_hat,   note: 42, velocity_from_envelope_peak: true }
+
+# PSG is intentionally absent from tone_map.
+# PSG @N/@eN/@rN is routed to psg_envelope_map.
+tone_map:
+  defaults:
+    on_unmapped: keep_previous_and_warn
+    emit_before_next_note: true
+    emit_text_meta: false
+  scc:
+    enabled: true
+    tones:
+      "0": { name: "SCC @0", events: [] }
+      "1": { name: "SCC @1", events: [] }
+      "2": { name: "SCC @2", events: [] }
+      "3": { name: "SCC @3", events: [] }
+      "4": { name: "SCC @4", events: [] }
+      "5": { name: "SCC @5", events: [] }
+      "6": { name: "SCC @6", events: [] }
+      "7": { name: "SCC @7", events: [] }
+      "8": { name: "SCC @8", events: [] }
+      "9": { name: "SCC @9", events: [] }
+      "10": { name: "SCC @10", events: [] }
+      "11": { name: "SCC @11", events: [] }
+      "12": { name: "SCC @12", events: [] }
+      "13": { name: "SCC @13", events: [] }
+      "14": { name: "SCC @14", events: [] }
+      "15": { name: "SCC @15", events: [] }
+      "16": { name: "SCC @16", events: [] }
+  opll:
+    enabled: true
+    respect_at_hash_rom_assign: true
+    tones:
+      "0":  { name: violin,        events: [ { pc: { program: 40 } } ] }
+      "1":  { name: guitar,        events: [ { pc: { program: 24 } } ] }
+      "2":  { name: piano,         events: [ { pc: { program: 0  } } ] }
+      "3":  { name: flute,         events: [ { pc: { program: 73 } } ] }
+      "4":  { name: clarinet,      events: [ { pc: { program: 71 } } ] }
+      "5":  { name: oboe,          events: [ { pc: { program: 68 } } ] }
+      "6":  { name: trumpet,       events: [ { pc: { program: 56 } } ] }
+      "7":  { name: organ,         events: [ { pc: { program: 16 } } ] }
+      "8":  { name: horn,          events: [ { pc: { program: 60 } } ] }
+      "9":  { name: synthesizer,   events: [ { pc: { program: 80 } } ] }
+      "10": { name: harpsichord,   events: [ { pc: { program: 6  } } ] }
+      "11": { name: vibraphone,    events: [ { pc: { program: 11 } } ] }
+      "12": { name: synth_bass,    events: [ { pc: { program: 38 } } ] }
+      "13": { name: wood_bass,     events: [ { pc: { program: 32 } } ] }
+      "14": { name: electric_bass, events: [ { pc: { program: 33 } } ] }
+      "15": { name: custom_user,   events: [] }
+      "16": { name: custom_user,   events: [] }
+
+envelope_map:
+  enabled: true
+  default_mode: cc11
+  midi_cc:
+    expression: 11
+    volume: 7
+  trigger:
+    on_apply_command: select_only
+    on_note_on: restart_envelope
+  emit_initial_cc_before_note_on: true
+  families:
+    scc: { enabled: true }
+    opll: { enabled: true }
+  fallback_modes:
+    split_velocity:
+      enabled: false
+      min_segment_ticks: 30
+
+envelope_side_effects:
+  tone_change_inside_envelope:
+    policy: emit_at_exact_tick_with_warning
+    allow_program_change: true
+    allow_cc: true
+    allow_split_note: false
+  register_write_inside_envelope:
+    policy: route_to_register_map
+
+opll_register_map:
+  enabled: true
+  default_policy: ignore_and_report
+  report:
+    collect_usage: true
+    group_by: [family, register, data, source_track, context]
+  rules:
+    - name: ignore_all_y_initially
+      enabled: true
+      match: { family: "*", source_track: "*", register: "*", data: "*", context: "*" }
+      emit: []
+    - name: example_opll_y2_to_expression
+      enabled: false
+      match: { family: opll, source_track: "*", register: 2, data: "*", context: "*" }
+      emit:
+        - cc:
+            controller: 11
+            value: "expr: clamp(127 - round(data * 127 / 63), 0, 127)"
+
+smf_macros:
+  max_depth: 8
+  bright_lead:
+    events:
+      - pc: { program: 80 }
+      - cc: { controller: 7, value: 110 }
+      - cc: { controller: 11, value: 127 }
+      - cc: { controller: 74, value: 105 }
+      - cc: { controller: 91, value: 24 }
+  reset_channel:
+    events:
+      - cc: { controller: 121, value: 0 }
+      - cc: { controller: 7, value: 100 }
+      - cc: { controller: 10, value: 64 }
+      - cc: { controller: 11, value: 127 }
+
+diagnostics:
+  output_format: json
+  strict_mode: false
+  include:
+    - input_file
+    - output_file
+    - config_files
+    - track_summary
+    - manual_smf_events
+    - tone_usage
+    - psg_envelope_usage
+    - scc_opll_envelope_usage
+    - register_write_usage
+    - unmapped_tones
+    - undefined_envelopes
+    - unsupported_commands
+    - warnings
