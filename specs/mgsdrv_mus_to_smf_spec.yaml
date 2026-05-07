@@ -1,0 +1,360 @@
+version: 0.1.0
+name: mgsdrv-mus-to-smf
+summary: >-
+  Convert MGSDRV/MGSC111 .MUS MML text files to Standard MIDI Files.
+  Preserve timing, notes, tempo, track separation, and approximate @e/@r
+  envelopes with MIDI CC or velocity operations. Do not emulate SCC/OPLL/PSG timbres.
+
+input:
+  format: text_mus
+  encodings:
+    default: auto
+    supported:
+      - utf-8
+      - shift_jis
+  line_endings: [crlf, lf]
+  comments:
+    marker: ";"
+    behavior: "truncate from semicolon to end of line outside quoted strings"
+  stop_at_directive: "#end"
+
+output:
+  format: smf
+  default_type: 1
+  default_ppq: 3600
+  conductor_track:
+    index: 0
+    events:
+      - set_tempo
+      - track_name
+      - text
+      - marker
+      - end_of_track
+  per_source_track: true
+  default_loop_marker_names:
+    start: loopStart
+    end: loopEnd
+
+source_time:
+  whole_note_steps: 192
+  quarter_note_steps: 48
+  step_to_midi_ticks: "source_step * ppq / 48"
+  recommended_ppq: 3600
+  length:
+    denominator_steps: "192 / denominator"
+    absolute_steps: "%N"
+    max_single_event_steps: 256
+    use_rational_until_render: true
+    dotted_notes: true
+    tie_command: "^"
+    slur_command: "&"
+  tempo:
+    default_bpm: 120
+    allowed_range: [57, 2047]
+    global: true
+    midi_microseconds_per_quarter: "60000000 / bpm"
+    tempo_sources:
+      - "#tempo"
+      - "t"
+    conflict_policy: warn
+  envelope_count:
+    unit_seconds: "1/60"
+    tick_conversion: "seconds_to_tick(note_on_seconds + count / 60)"
+
+parser:
+  top_level:
+    directives:
+      supported:
+        - "#opll_mode"
+        - "#tempo"
+        - "#title"
+        - "#macro_offset"
+        - "#play_track"
+        - "#end"
+      ignored_with_warning:
+        - "#machine_id"
+        - "#lfo_mode"
+        - "#alloc"
+        - "#psg_tune"
+        - "#opll_tune"
+        - "#play_start"
+        - "#no_mgs"
+        - "#track_status"
+        - "#disenable_mgsrc"
+    definitions:
+      envelope_e: "@e<number> = { Mode, Noise, data... }"
+      envelope_r: "@r<number> = { Mode, Noise, AL, AR, DR, SL, SR, RR }"
+      scc_tone: "@s<number> = { 32 bytes }"
+      fm_tone: "@v<number> = { data... }"
+      rom_tone_assign: "@#<number> = <n>"
+      macro: "*<number> = { text }"
+      control_text: "@m<number> = { string }"
+    track_line:
+      selector_regex: "^[1-9a-hA-HrRfF]+[ \t]+"
+      multiple_track_selectors_duplicate_content: true
+  macro_expansion:
+    max_depth: 8
+    macro_numbers: [0, 255]
+    macro_offset_supported: true
+    undefined_macro_policy: error
+  loops:
+    max_nesting: 16
+    default_repeat_count: 2
+    infinite_repeat_count_token: 0
+    alternative_token: "|"
+
+tracks:
+  opll_mode_0:
+    psg: ["1", "2", "3"]
+    scc: ["4", "5", "6", "7", "8"]
+    fm: ["9", "a", "b", "c", "d", "e", "f", "g", "h"]
+    rhythm: []
+  opll_mode_1:
+    psg: ["1", "2", "3"]
+    scc: ["4", "5", "6", "7", "8"]
+    fm: ["9", "a", "b", "c", "d", "e"]
+    rhythm: ["f", "r"]
+
+mml_state_defaults:
+  octave: 4
+  default_length_denominator: 4
+  volume: 0
+  q: 8
+  detune: 0
+  tone: null
+  envelope: null
+  midi_note_base:
+    o4c: 60
+
+note_mapping:
+  notes:
+    c: 0
+    d: 2
+    e: 4
+    f: 5
+    g: 7
+    a: 9
+    b: 11
+  accidentals:
+    "+": 1
+    "-": -1
+  formula: "midi_note = o4c + (octave - 4) * 12 + semitone"
+  clamp_policy: warn_and_skip_out_of_range
+  valid_midi_note_range: [0, 127]
+
+volume_mapping:
+  source_volume_range: [0, 15]
+  midi_velocity_range: [1, 127]
+  zero_volume_velocity: 1
+  formula: "round(source_v / 15 * 127)"
+  relative_commands:
+    increase: ["v+", ")"]
+    decrease: ["v-", "("]
+  clamp: [0, 15]
+
+envelope:
+  default_mode: cc11
+  supported_modes:
+    - cc11
+    - cc7
+    - note_velocity
+    - split_velocity
+    - off
+  midi_cc:
+    expression: 11
+    volume: 7
+  e_definition:
+    id_range: [0, 31]
+    mode_range: [0, 3]
+    noise_range: [0, 31]
+    level_range: [0, 15]
+    commands:
+      hex_level:
+        syntax: "[0-9a-fA-F]"
+        duration_counts: 1
+      hold:
+        syntax: "<level>:<count>"
+        count_range: [2, 239]
+      ramp:
+        syntax: "<level>=<count>"
+        interpolation: linear
+        count_range: [2, 239]
+      loop_start:
+        syntax: "["
+      loop_end:
+        syntax: "]"
+      noise:
+        syntax: "n<number>"
+        policy: ignore_with_warning
+      mode:
+        syntax: "/<number> or *<number>"
+        policy: ignore_with_warning
+      tone_change:
+        syntax: "@<number>"
+        policy: ignore_with_warning
+      register_write:
+        syntax: "y<register>,<data>"
+        policy: ignore_with_warning
+      frequency_offset:
+        syntax: "\\<number>"
+        policy: ignore_with_warning
+      separators:
+        syntax: ". or ,"
+        policy: ignore
+    render_until: note_off
+    loop_policy: repeat_until_note_off
+    end_policy: hold_last_level
+  r_definition:
+    id_range: [0, 31]
+    value_range: [0, 255]
+    simulation_hz: 60
+    attack: "volume = min(255, volume + AR) from AL until 255"
+    decay: "volume = max(SL, volume - DR)"
+    sustain: "volume = max(0, volume - SR) until note_off"
+    release: "optional; default disabled after note_off"
+  attachment:
+    psg_at_n_sets_envelope: true
+    psg_at_e_behaves_like_at: true
+    scc_fm_at_e_copies_envelope_to_current_tone: true
+    current_tone_envelope_map: true
+
+smf_rendering:
+  type: 1
+  channel_allocation:
+    default_policy: one_source_track_per_channel
+    rhythm_channel_zero_based: 9
+    overflow_policy: error
+    overflow_options:
+      - error
+      - shared
+      - multi_port
+  events:
+    note_on_velocity_from_v: true
+    envelope_before_note_on: true
+    note_off_velocity: 0
+    program_change_default: false
+    text_meta_for_ignored_tones: optional
+  tone_policy:
+    default: ignore
+    options:
+      - ignore
+      - gm_program
+      - text_meta
+    gm_program_map_zero_based:
+      "0": 40
+      "1": 24
+      "2": 0
+      "3": 73
+      "4": 71
+      "5": 68
+      "6": 56
+      "7": 16
+      "8": 60
+      "9": 80
+      "10": 6
+      "11": 11
+      "12": 38
+      "13": 32
+      "14": 33
+  rhythm_map:
+    enabled: true
+    gm_drum_notes:
+      b: 36
+      s: 38
+      m: 45
+      c: 49
+      h: 42
+
+unsupported_commands:
+  default_policy: ignore_with_warning
+  commands:
+    psg_hard_envelope_m: ignore_with_warning
+    psg_hard_envelope_s: ignore_with_warning
+    psg_noise_n: ignore_with_warning
+    psg_mode_slash: ignore_with_warning
+    detune_backslash: ignore_with_warning
+    fine_detune_at_backslash: ignore_with_warning
+    pitch_down_p: ignore_with_warning
+    lfo_h: ignore_with_warning
+    lfo_at_p: ignore_with_warning
+    ho: ignore_with_warning
+    hf: ignore_with_warning
+    hi: ignore_with_warning
+    pitch_glide_underscore: ignore_with_warning
+    register_write_y: ignore_with_warning
+    fm_total_level_at_l: ignore_with_warning
+    sustain_so_sf: ignore_with_warning
+    keyoff_ko_kf: ignore_with_warning
+    fade_at_f: text_meta_or_ignore
+    debug_dollar: ignore
+
+diagnostics:
+  output_format: json
+  include:
+    - input_file
+    - output_file
+    - ppq
+    - tempo_map
+    - track_summary
+    - unsupported_commands
+    - parse_warnings
+    - channel_allocation
+    - loop_markers
+    - envelope_event_counts
+  strict_mode: "warnings become errors"
+
+cli:
+  binary_name: mgs2smf
+  usage: "mgs2smf input.mus -o output.mid [options]"
+  options:
+    config: "--config <path>"
+    output: "-o, --output <path>"
+    ppq: "--ppq <integer>"
+    loop_count: "--loop-count <integer>"
+    envelope_mode: "--envelope-mode <cc11|cc7|note_velocity|split_velocity|off>"
+    tone_policy: "--tone-policy <ignore|gm_program|text_meta>"
+    rhythm_map: "--rhythm-map <gm|off>"
+    octave_base: "--octave-base o4c=<midi_note>"
+    encoding: "--encoding <auto|utf-8|shift_jis>"
+    diagnostics: "--diagnostics <path>"
+    strict: "--strict"
+    channel_overflow: "--channel-overflow <error|shared|multi_port>"
+    batch: "--batch <glob_or_directory>"
+
+acceptance_tests:
+  - name: simple_scale
+    mus: |
+      #opll_mode 0
+      #tempo 120
+      1 o4 v15 l4 cdef
+    expect:
+      ppq: 3600
+      note_count: 4
+      first_note: {note: 60, tick: 0, duration_ticks: 3600, velocity: 127}
+  - name: absolute_steps
+    mus: |
+      #opll_mode 0
+      #tempo 120
+      1 o4 v15 c%48 r%48 d%96
+    expect:
+      notes:
+        - {note: 60, tick: 0, duration_ticks: 3600}
+        - {note: 62, tick: 7200, duration_ticks: 7200}
+  - name: envelope_cc11
+    mus: |
+      #opll_mode 0
+      #tempo 120
+      @e0 = {1,0,f:2,8=4,[84]}
+      1 o4 v15 @e0 c1
+    expect:
+      has_cc11: true
+      envelope_mode: cc11
+      loop_expanded_until_note_off: true
+  - name: infinite_loop_marker
+    mus: |
+      #opll_mode 0
+      #tempo 120
+      1 [0 cdef]
+    expect:
+      markers: [loopStart, loopEnd]
+      finite_unroll_default: 1

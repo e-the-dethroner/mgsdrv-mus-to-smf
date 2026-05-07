@@ -1,0 +1,4 @@
+#title "compat loop marker"
+#tempo 120
+1 o4 v12 l8 [0 c e g > c]
+2 o3 v10 l8 [0 c g]

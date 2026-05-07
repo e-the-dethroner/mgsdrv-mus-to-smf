@@ -1,0 +1,5 @@
+#opll_mode 1
+#title "compat rhythm loop"
+#tempo 120
+f v15 l8 [0 b s m c h]
+1 o4 v12 l8 [0 c e g > c]

@@ -1,0 +1,5 @@
+#title "compat envelope tempo"
+#tempo 120
+@e0 = {1,0,f:31,8=8,[84]}
+1 o4 v15 @e0 c1
+2 r%48 t60 r%144
