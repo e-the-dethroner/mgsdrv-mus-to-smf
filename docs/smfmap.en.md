@@ -113,6 +113,17 @@ tracks:
 
 For OPLL-family tracks, `family: rhythm` is treated as a shorthand roughly equivalent to `source_family: opll`, `render_role: drum`, and `drum_map: default_opll_pseudo`. This is distinct from native `#opll_mode 1` rhythm tracks.
 
+Track entries can also emit initial SMF events at tick 0. This is useful for PSG melody tracks, because PSG `@N` is an envelope selector and does not produce Program Change by itself.
+
+```yaml
+tracks:
+  "3":
+    source_family: psg
+    midi_channel: 0
+    events:
+      - pc: { program: 38 }   # Synth Bass 1, zero-based GM
+```
+
 ## Manual SMF Directives
 
 Use `;@smf` comments in the MUS file to insert MIDI or meta events without breaking MGSDRV/MGSC compatibility.

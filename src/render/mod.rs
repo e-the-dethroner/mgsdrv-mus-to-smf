@@ -271,6 +271,26 @@ pub fn collect_midi_events(
             1,
             RenderedEventKind::TrackName(format!("MGS {}", track.source_id)),
         ));
+        if let Some(track_config) = options.smfmap.tracks.get(&track.source_id) {
+            let source_span = SourceSpan {
+                line: None,
+                track: Some(track.source_id.clone()),
+            };
+            for request in &track_config.events {
+                emit_smf_request(
+                    &mut events,
+                    midi_track,
+                    0,
+                    Some(channel),
+                    Some(track.source_id.clone()),
+                    request,
+                    options,
+                    &mut song.diagnostics,
+                    &source_span,
+                    0,
+                )?;
+            }
+        }
 
         let mut note_count = 0usize;
         let mut cc_count = 0usize;

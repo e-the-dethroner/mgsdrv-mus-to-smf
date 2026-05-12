@@ -112,6 +112,17 @@ tracks:
 
 `family: rhythm` は OPLL 系トラックでは短縮記法として扱われ、概ね `source_family: opll`、`render_role: drum`、`drum_map: default_opll_pseudo` として解釈されます。ただし、正式な `#opll_mode 1` rhythm track とは別物です。
 
+track 設定には、tick 0 で出す初期 SMF event も書けます。PSG melody track では `@N` が envelope 選択であり Program Change を出さないため、既定 piano を避けたい場合に使います。
+
+```yaml
+tracks:
+  "3":
+    source_family: psg
+    midi_channel: 0
+    events:
+      - pc: { program: 38 }   # Synth Bass 1, zero-based GM
+```
+
 ## 手動 SMF directive
 
 MUS ファイル内に `;@smf` コメントを書くと、MGSDRV/MGSC111 互換を保ったまま MIDI/メタイベントを追加できます。

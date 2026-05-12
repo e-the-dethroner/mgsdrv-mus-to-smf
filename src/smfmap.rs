@@ -602,6 +602,9 @@ impl SmfMapConfig {
             let Value::Mapping(fields) = item else {
                 continue;
             };
+            let parsed_events = fields
+                .get_str("events")
+                .and_then(|value| parse_events(value, self));
             let entry = self.tracks.entry(track_id.clone()).or_default();
             if let Some(family) = fields
                 .get_str("source_family")
@@ -642,6 +645,9 @@ impl SmfMapConfig {
             }
             if let Some(port) = fields.get_str("midi_port").and_then(yaml_u8) {
                 entry.midi_port = Some(port);
+            }
+            if let Some(events) = parsed_events {
+                entry.events = events;
             }
         }
     }
@@ -996,6 +1002,7 @@ pub struct TrackMapConfig {
     pub drum_map: Option<String>,
     pub midi_channel: Option<u8>,
     pub midi_port: Option<u8>,
+    pub events: Vec<SmfRequest>,
 }
 
 #[derive(Clone, Debug)]

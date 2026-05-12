@@ -3727,6 +3727,42 @@ tracks:
     }
 
     #[test]
+    fn track_config_events_emit_initial_program_change() {
+        let mut opts = ConversionOptions::default();
+        opts.smfmap
+            .merge_yaml_str(
+                r#"
+tracks:
+  "3":
+    midi_channel: 4
+    events:
+      - pc: { program: 38 }
+"#,
+            )
+            .unwrap();
+        let mut song = parse_source("3 c4\n", &opts).unwrap();
+        let events = collect_midi_events(&mut song, &opts).unwrap();
+        let pc_index = events
+            .iter()
+            .position(|event| matches!(event.kind, RenderedEventKind::ProgramChange { .. }))
+            .unwrap();
+        let note_index = events
+            .iter()
+            .position(|event| matches!(event.kind, RenderedEventKind::NoteOn { .. }))
+            .unwrap();
+        let pc = &events[pc_index];
+        assert_eq!(pc.abs_tick, 0);
+        assert!(pc_index < note_index);
+        assert!(matches!(
+            pc.kind,
+            RenderedEventKind::ProgramChange {
+                channel: 4,
+                program: 38
+            }
+        ));
+    }
+
+    #[test]
     fn opll_register_write_is_reported_and_emits_no_smf_event() {
         let opts = ConversionOptions::default();
         let mut song = parse_source("9 y14,32 c4\n", &opts).unwrap();

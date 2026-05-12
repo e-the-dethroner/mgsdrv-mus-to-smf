@@ -2,6 +2,18 @@ version: 0.4.1
 extends: mgsdrv_smfmap_config_schema_v0_4.yaml
 
 sections:
+  tracks:
+    value:
+      events:
+        type: array
+        item: smf_event
+        default: []
+        description: >
+          Initial SMF events emitted at tick 0 for the source track. The track
+          MIDI channel is used unless an event has an explicit target.
+        examples:
+          - pc: { program: 38 }
+
   pitch_glide:
     description: >
       Opt-in rendering for MGSC111 _target pitch glide. The output is MIDI Pitch
