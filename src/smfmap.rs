@@ -55,6 +55,107 @@ impl RegisterMapPolicy {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PitchGlideSharedChannelPolicy {
+    Error,
+    WarnAndSuppress,
+    AllowUnsafe,
+}
+
+impl PitchGlideSharedChannelPolicy {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "error" => Some(Self::Error),
+            "warn_and_suppress" | "warn_suppress" => Some(Self::WarnAndSuppress),
+            "allow_unsafe" => Some(Self::AllowUnsafe),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PitchGlideRangePolicy {
+    Clamp,
+    ErrorIfExceeded,
+    AutoExpandTo48,
+}
+
+impl PitchGlideRangePolicy {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "clamp" | "warn_and_clamp" => Some(Self::Clamp),
+            "error_if_exceeded" | "error" => Some(Self::ErrorIfExceeded),
+            "auto_expand_to_48" => Some(Self::AutoExpandTo48),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PitchGlideConfig {
+    pub enabled: bool,
+    pub pitch_bend_range_semitones: u8,
+    pub pitch_bend_range_cents: u8,
+    pub emit_rpn_pitch_bend_range: bool,
+    pub emit_rpn_null_after_setting: bool,
+    pub curve: PitchGlideCurveConfig,
+    pub reset: PitchGlideResetConfig,
+    pub shared_channel_policy: PitchGlideSharedChannelPolicy,
+    pub range_policy: PitchGlideRangePolicy,
+}
+
+impl Default for PitchGlideConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pitch_bend_range_semitones: 24,
+            pitch_bend_range_cents: 0,
+            emit_rpn_pitch_bend_range: true,
+            emit_rpn_null_after_setting: true,
+            curve: PitchGlideCurveConfig::default(),
+            reset: PitchGlideResetConfig::default(),
+            shared_channel_policy: PitchGlideSharedChannelPolicy::WarnAndSuppress,
+            range_policy: PitchGlideRangePolicy::Clamp,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PitchGlideCurveConfig {
+    pub event_rate_hz: u16,
+    pub min_delta_cents: u16,
+    pub include_start_point: bool,
+    pub include_end_point: bool,
+}
+
+impl Default for PitchGlideCurveConfig {
+    fn default() -> Self {
+        Self {
+            event_rate_hz: 60,
+            min_delta_cents: 4,
+            include_start_point: true,
+            include_end_point: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PitchGlideResetConfig {
+    pub at_note_end: bool,
+    pub before_next_note_on: bool,
+    pub at_track_end: bool,
+}
+
+impl Default for PitchGlideResetConfig {
+    fn default() -> Self {
+        Self {
+            at_note_end: true,
+            before_next_note_on: true,
+            at_track_end: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PsgNoiseDefaultAction {
     EnvelopeCc,
     DrumMap,
@@ -68,6 +169,80 @@ impl PsgNoiseDefaultAction {
             "drum_map" => Some(Self::DrumMap),
             "ignore" => Some(Self::Ignore),
             _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderRole {
+    Melody,
+    Drum,
+}
+
+impl RenderRole {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "melody" | "melodic" => Some(Self::Melody),
+            "drum" | "drums" | "rhythm" => Some(Self::Drum),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DrumOutputMode {
+    Replace,
+    Add,
+    Passthrough,
+}
+
+impl DrumOutputMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "replace" => Some(Self::Replace),
+            "add" => Some(Self::Add),
+            "passthrough" | "pass_through" => Some(Self::Passthrough),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DrumUnmatchedPolicy {
+    WarnAndDrop,
+    Drop,
+    Passthrough,
+    WarnAndPassthrough,
+}
+
+impl DrumUnmatchedPolicy {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "warn_and_drop" | "warn_drop" => Some(Self::WarnAndDrop),
+            "drop" => Some(Self::Drop),
+            "passthrough" | "pass_through" => Some(Self::Passthrough),
+            "warn_and_passthrough" | "warn_and_pass_through" => Some(Self::WarnAndPassthrough),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DrumVelocity {
+    SourceVolume,
+    SourceOrTone,
+    Fixed(u8),
+}
+
+impl DrumVelocity {
+    fn parse(value: &Value) -> Self {
+        if let Some(velocity) = yaml_u8(value) {
+            return Self::Fixed(velocity.clamp(1, 127));
+        }
+        match yaml_string(value).unwrap_or("source_volume") {
+            "source_volume" => Self::SourceVolume,
+            "source_or_tone" => Self::SourceOrTone,
+            _ => Self::SourceVolume,
         }
     }
 }
@@ -102,6 +277,9 @@ pub struct SmfMapConfig {
     pub tone_map: BTreeMap<SourceFamily, BTreeMap<u8, ToneMapEntry>>,
     pub macros: BTreeMap<String, Vec<SmfRequest>>,
     pub opll_respect_at_hash_rom_assign: bool,
+    pub opll_pseudo_drum_enabled: bool,
+    pub opll_pseudo_drum_maps: BTreeMap<String, OpllPseudoDrumMap>,
+    pub pitch_glide: PitchGlideConfig,
 }
 
 impl Default for SmfMapConfig {
@@ -139,6 +317,9 @@ impl Default for SmfMapConfig {
             tone_map,
             macros: default_macros(),
             opll_respect_at_hash_rom_assign: true,
+            opll_pseudo_drum_enabled: false,
+            opll_pseudo_drum_maps: default_opll_pseudo_drum_maps(),
+            pitch_glide: PitchGlideConfig::default(),
         }
     }
 }
@@ -163,10 +344,35 @@ impl SmfMapConfig {
         opll_mode: i32,
         kind: TrackKind,
     ) -> SourceFamily {
-        if let Some(family) = self.tracks.get(track_id).and_then(|track| track.family) {
-            return family;
+        if let Some(family) = self
+            .tracks
+            .get(track_id)
+            .and_then(|track| track.source_family)
+        {
+            return normalize_configured_source_family(track_id, kind, family);
         }
         default_family_for_track(track_id, opll_mode, kind)
+    }
+
+    pub fn render_role_for_track(&self, track_id: &str, kind: TrackKind) -> RenderRole {
+        if let Some(role) = self
+            .tracks
+            .get(track_id)
+            .and_then(|track| track.render_role)
+        {
+            return role;
+        }
+        if kind == TrackKind::Rhythm {
+            RenderRole::Drum
+        } else {
+            RenderRole::Melody
+        }
+    }
+
+    pub fn drum_map_for_track(&self, track_id: &str) -> Option<&str> {
+        self.tracks
+            .get(track_id)
+            .and_then(|track| track.drum_map.as_deref())
     }
 
     pub fn midi_channel_for_track(&self, track_id: &str) -> Option<u8> {
@@ -178,6 +384,54 @@ impl SmfMapConfig {
 
     pub fn midi_port_for_track(&self, track_id: &str) -> Option<u8> {
         self.tracks.get(track_id).and_then(|track| track.midi_port)
+    }
+
+    pub fn opll_pseudo_drum_map_for_track(
+        &self,
+        track_id: &str,
+        kind: TrackKind,
+    ) -> Option<&OpllPseudoDrumMap> {
+        if !self.opll_pseudo_drum_enabled
+            || self.render_role_for_track(track_id, kind) != RenderRole::Drum
+        {
+            return None;
+        }
+        let configured_family = self
+            .tracks
+            .get(track_id)
+            .and_then(|track| track.source_family);
+        let source_family = configured_family
+            .map(|family| normalize_configured_source_family(track_id, kind, family))
+            .unwrap_or_else(|| default_family_for_track(track_id, 0, kind));
+        if source_family != SourceFamily::Opll {
+            return None;
+        }
+        let map_name = self
+            .drum_map_for_track(track_id)
+            .unwrap_or("default_opll_pseudo");
+        self.opll_pseudo_drum_maps.get(map_name)
+    }
+
+    pub fn opll_pseudo_drum_channel_for_track(
+        &self,
+        track_id: &str,
+        kind: TrackKind,
+    ) -> Option<u8> {
+        self.opll_pseudo_drum_map_for_track(track_id, kind)
+            .map(|map| {
+                map.output
+                    .midi_channel
+                    .unwrap_or(self.rhythm_channel)
+                    .min(15)
+            })
+    }
+
+    pub fn opll_pseudo_drum_for_note<'a>(
+        &self,
+        map: &'a OpllPseudoDrumMap,
+        context: &OpllPseudoDrumContext<'_>,
+    ) -> Option<&'a OpllPseudoDrumRule> {
+        map.rules.iter().find(|rule| rule.matcher.matches(context))
     }
 
     pub fn tone_events(&self, family: SourceFamily, tone: u8) -> Option<&[SmfRequest]> {
@@ -276,8 +530,10 @@ impl SmfMapConfig {
         self.merge_smf(root.get_key("smf"));
         self.merge_manual_smf(root.get_key("manual_smf"));
         self.merge_tracks(root.get_key("tracks"));
+        self.merge_pitch_glide(root.get_key("pitch_glide"));
         self.merge_psg_envelope_map(root.get_key("psg_envelope_map"));
         self.merge_psg_noise_map(root.get_key("psg_noise_map"));
+        self.merge_opll_pseudo_drum_map(root.get_key("opll_pseudo_drum_map"));
         self.merge_envelope_map(root.get_key("envelope_map"));
         self.merge_tone_map(root.get_key("tone_map"));
         self.merge_register_map(root.get_key("opll_register_map"));
@@ -346,19 +602,120 @@ impl SmfMapConfig {
             let Value::Mapping(fields) = item else {
                 continue;
             };
-            let entry = self.tracks.entry(track_id).or_default();
+            let entry = self.tracks.entry(track_id.clone()).or_default();
+            if let Some(family) = fields
+                .get_str("source_family")
+                .and_then(yaml_string)
+                .and_then(SourceFamily::parse)
+            {
+                entry.source_family = Some(family);
+            }
             if let Some(family) = fields
                 .get_str("family")
                 .and_then(yaml_string)
                 .and_then(SourceFamily::parse)
             {
-                entry.family = Some(family);
+                if family == SourceFamily::Rhythm {
+                    entry.render_role = Some(RenderRole::Drum);
+                    entry.source_family = Some(SourceFamily::Rhythm);
+                    if is_opll_track_id(&track_id) {
+                        entry
+                            .drum_map
+                            .get_or_insert_with(|| "default_opll_pseudo".to_string());
+                    }
+                } else {
+                    entry.source_family = Some(family);
+                }
+            }
+            if let Some(role) = fields
+                .get_str("render_role")
+                .and_then(yaml_string)
+                .and_then(RenderRole::parse)
+            {
+                entry.render_role = Some(role);
+            }
+            if let Some(drum_map) = fields.get_str("drum_map").and_then(yaml_string) {
+                entry.drum_map = Some(drum_map.to_string());
             }
             if let Some(channel) = fields.get_str("midi_channel").and_then(yaml_u8) {
                 entry.midi_channel = Some(channel);
             }
             if let Some(port) = fields.get_str("midi_port").and_then(yaml_u8) {
                 entry.midi_port = Some(port);
+            }
+        }
+    }
+
+    fn merge_pitch_glide(&mut self, value: Option<&Value>) {
+        let Some(value) = value else {
+            return;
+        };
+        if let Some(enabled) = value.get_key("enabled").and_then(yaml_bool) {
+            self.pitch_glide.enabled = enabled;
+        }
+        if let Some(output) = value.get_key("output").and_then(yaml_string) {
+            if output != "pitch_bend" {
+                self.pitch_glide.enabled = false;
+            }
+        }
+        if let Some(range) = value
+            .get_key("pitch_bend_range_semitones")
+            .and_then(yaml_u8)
+        {
+            self.pitch_glide.pitch_bend_range_semitones = range.max(1).min(48);
+        }
+        if let Some(cents) = value.get_key("pitch_bend_range_cents").and_then(yaml_u8) {
+            self.pitch_glide.pitch_bend_range_cents = cents.min(99);
+        }
+        if let Some(enabled) = value
+            .get_key("emit_rpn_pitch_bend_range")
+            .and_then(yaml_bool)
+        {
+            self.pitch_glide.emit_rpn_pitch_bend_range = enabled;
+        }
+        if let Some(enabled) = value
+            .get_key("emit_rpn_null_after_setting")
+            .and_then(yaml_bool)
+        {
+            self.pitch_glide.emit_rpn_null_after_setting = enabled;
+        }
+        if let Some(policy) = value
+            .get_key("shared_channel_policy")
+            .and_then(yaml_string)
+            .and_then(PitchGlideSharedChannelPolicy::parse)
+        {
+            self.pitch_glide.shared_channel_policy = policy;
+        }
+        if let Some(policy) = value
+            .get_key("range_policy")
+            .and_then(yaml_string)
+            .and_then(PitchGlideRangePolicy::parse)
+        {
+            self.pitch_glide.range_policy = policy;
+        }
+        if let Some(curve) = value.get_key("curve") {
+            if let Some(rate) = curve.get_key("event_rate_hz").and_then(yaml_u16) {
+                self.pitch_glide.curve.event_rate_hz = rate.clamp(1, 240);
+            }
+            if let Some(cents) = curve.get_key("min_delta_cents").and_then(yaml_u16) {
+                self.pitch_glide.curve.min_delta_cents = cents.min(1200);
+            }
+            if let Some(include) = curve.get_key("include_start_point").and_then(yaml_bool) {
+                self.pitch_glide.curve.include_start_point = include;
+            }
+            if let Some(include) = curve.get_key("include_end_point").and_then(yaml_bool) {
+                self.pitch_glide.curve.include_end_point = include;
+            }
+        }
+        if let Some(reset) = value.get_key("reset") {
+            if let Some(enabled) = reset.get_key("at_note_end").and_then(yaml_bool) {
+                self.pitch_glide.reset.at_note_end = enabled;
+            }
+            if let Some(enabled) = reset.get_key("before_next_note_on").and_then(yaml_bool) {
+                self.pitch_glide.reset.before_next_note_on = enabled;
+            }
+            if let Some(enabled) = reset.get_key("at_track_end").and_then(yaml_bool) {
+                self.pitch_glide.reset.at_track_end = enabled;
             }
         }
     }
@@ -434,6 +791,27 @@ impl SmfMapConfig {
                     velocity_from_envelope_peak,
                 },
             );
+        }
+    }
+
+    fn merge_opll_pseudo_drum_map(&mut self, value: Option<&Value>) {
+        let Some(value) = value else {
+            return;
+        };
+        if let Some(enabled) = value.get_key("enabled").and_then(yaml_bool) {
+            self.opll_pseudo_drum_enabled = enabled;
+        }
+        let Some(Value::Mapping(maps)) = value.get_key("maps") else {
+            return;
+        };
+        for (name, item) in maps {
+            let Some(name) = yaml_key_string(name) else {
+                continue;
+            };
+            let Some(map) = OpllPseudoDrumMap::parse(item, self) else {
+                continue;
+            };
+            self.opll_pseudo_drum_maps.insert(name, map);
         }
     }
 
@@ -613,9 +991,295 @@ impl SmfMapConfig {
 
 #[derive(Clone, Debug, Default)]
 pub struct TrackMapConfig {
-    pub family: Option<SourceFamily>,
+    pub source_family: Option<SourceFamily>,
+    pub render_role: Option<RenderRole>,
+    pub drum_map: Option<String>,
     pub midi_channel: Option<u8>,
     pub midi_port: Option<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OpllPseudoDrumMap {
+    pub output: OpllPseudoDrumOutput,
+    pub hit_grouping: OpllPseudoDrumHitGrouping,
+    pub rules: Vec<OpllPseudoDrumRule>,
+}
+
+impl OpllPseudoDrumMap {
+    fn parse(value: &Value, config: &SmfMapConfig) -> Option<Self> {
+        let Value::Mapping(fields) = value else {
+            return None;
+        };
+        if matches!(fields.get_str("enabled").and_then(yaml_bool), Some(false)) {
+            return None;
+        }
+        let output = fields
+            .get_str("output")
+            .and_then(|value| OpllPseudoDrumOutput::parse(value, config))
+            .unwrap_or_else(|| OpllPseudoDrumOutput::default_with_channel(config.rhythm_channel));
+        let hit_grouping = fields
+            .get_str("hit_grouping")
+            .and_then(OpllPseudoDrumHitGrouping::parse)
+            .unwrap_or_default();
+        let mut rules = Vec::new();
+        if let Some(Value::Sequence(items)) = fields.get_str("rules") {
+            for item in items {
+                if let Some(rule) = OpllPseudoDrumRule::parse(item) {
+                    rules.push(rule);
+                }
+            }
+        }
+        Some(Self {
+            output,
+            hit_grouping,
+            rules,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OpllPseudoDrumHitGrouping {
+    pub enabled: bool,
+    pub suppress_slur_ampersand: bool,
+    pub suppress_macro_continuation: bool,
+}
+
+impl Default for OpllPseudoDrumHitGrouping {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            suppress_slur_ampersand: true,
+            suppress_macro_continuation: true,
+        }
+    }
+}
+
+impl OpllPseudoDrumHitGrouping {
+    fn default_enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+
+    fn parse(value: &Value) -> Option<Self> {
+        let Value::Mapping(fields) = value else {
+            return None;
+        };
+        let mut grouping = Self::default();
+        if let Some(enabled) = fields.get_str("enabled").and_then(yaml_bool) {
+            grouping.enabled = enabled;
+        }
+        if let Some(Value::Sequence(items)) = fields.get_str("suppress_continuations") {
+            grouping.suppress_slur_ampersand = false;
+            grouping.suppress_macro_continuation = false;
+            for item in items {
+                let Some(name) = yaml_string(item) else {
+                    continue;
+                };
+                match name {
+                    "slur_ampersand" => grouping.suppress_slur_ampersand = true,
+                    "macro_continuation" => grouping.suppress_macro_continuation = true,
+                    "pitch_slide_underscore" => {}
+                    _ => {}
+                }
+            }
+        }
+        Some(grouping)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OpllPseudoDrumOutput {
+    pub midi_channel: Option<u8>,
+    pub mode: DrumOutputMode,
+    pub unmatched: DrumUnmatchedPolicy,
+    pub suppress_tone_map: bool,
+    pub suppress_program_change: bool,
+}
+
+impl OpllPseudoDrumOutput {
+    fn default_with_channel(channel: u8) -> Self {
+        Self {
+            midi_channel: Some(channel.min(15)),
+            mode: DrumOutputMode::Replace,
+            unmatched: DrumUnmatchedPolicy::WarnAndDrop,
+            suppress_tone_map: true,
+            suppress_program_change: true,
+        }
+    }
+
+    fn parse(value: &Value, config: &SmfMapConfig) -> Option<Self> {
+        let Value::Mapping(fields) = value else {
+            return None;
+        };
+        let mut output = Self::default_with_channel(config.rhythm_channel);
+        if let Some(channel) = fields.get_str("midi_channel").and_then(yaml_u8) {
+            output.midi_channel = Some(config.channel_numbering.normalize(channel).min(15));
+        }
+        if let Some(mode) = fields
+            .get_str("mode")
+            .and_then(yaml_string)
+            .and_then(DrumOutputMode::parse)
+        {
+            output.mode = mode;
+        }
+        if let Some(unmatched) = fields
+            .get_str("unmatched")
+            .and_then(yaml_string)
+            .and_then(DrumUnmatchedPolicy::parse)
+        {
+            output.unmatched = unmatched;
+        }
+        if let Some(suppress) = fields.get_str("suppress_tone_map").and_then(yaml_bool) {
+            output.suppress_tone_map = suppress;
+        }
+        if let Some(suppress) = fields
+            .get_str("suppress_program_change")
+            .and_then(yaml_bool)
+        {
+            output.suppress_program_change = suppress;
+        }
+        output.midi_channel.get_or_insert(config.rhythm_channel);
+        Some(output)
+    }
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct OpllPseudoDrumRule {
+    pub name: String,
+    pub matcher: OpllPseudoDrumMatcher,
+    pub drum: OpllPseudoDrumEntry,
+}
+
+impl OpllPseudoDrumRule {
+    fn parse(value: &Value) -> Option<Self> {
+        let Value::Mapping(fields) = value else {
+            return None;
+        };
+        let name = fields
+            .get_str("name")
+            .and_then(yaml_string)
+            .unwrap_or("unnamed_opll_pseudo_drum_rule")
+            .to_string();
+        let matcher = fields
+            .get_str("match")
+            .and_then(OpllPseudoDrumMatcher::parse)
+            .unwrap_or_default();
+        let drum = fields
+            .get_str("drum")
+            .and_then(OpllPseudoDrumEntry::parse)?;
+        Some(Self {
+            name,
+            matcher,
+            drum,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OpllPseudoDrumEntry {
+    pub note: u8,
+    pub velocity: DrumVelocity,
+}
+
+impl OpllPseudoDrumEntry {
+    fn parse(value: &Value) -> Option<Self> {
+        let Value::Mapping(fields) = value else {
+            return None;
+        };
+        Some(Self {
+            note: fields.get_str("note").and_then(yaml_u8)?.min(127),
+            velocity: fields
+                .get_str("velocity")
+                .map(DrumVelocity::parse)
+                .unwrap_or(DrumVelocity::SourceVolume),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OpllPseudoDrumMatcher {
+    macro_symbol: StringMatcher,
+    source_track: StringMatcher,
+    envelope: U8Matcher,
+    source_tone: U8Matcher,
+    effective_tone: U8Matcher,
+    note_name: StringMatcher,
+    octave: I32Matcher,
+    source_midi_note: U8Matcher,
+}
+
+impl OpllPseudoDrumMatcher {
+    fn parse(value: &Value) -> Option<Self> {
+        let Value::Mapping(fields) = value else {
+            return None;
+        };
+        Some(Self {
+            macro_symbol: fields
+                .get_str("macro_symbol")
+                .map(StringMatcher::parse)
+                .unwrap_or(StringMatcher::Any),
+            source_track: fields
+                .get_str("track")
+                .or_else(|| fields.get_str("source_track"))
+                .map(StringMatcher::parse)
+                .unwrap_or(StringMatcher::Any),
+            envelope: fields
+                .get_str("envelope")
+                .map(U8Matcher::parse)
+                .unwrap_or(U8Matcher::Any),
+            source_tone: fields
+                .get_str("source_tone")
+                .map(U8Matcher::parse)
+                .unwrap_or(U8Matcher::Any),
+            effective_tone: fields
+                .get_str("effective_tone")
+                .or_else(|| fields.get_str("effective_rom_tone"))
+                .map(U8Matcher::parse)
+                .unwrap_or(U8Matcher::Any),
+            note_name: fields
+                .get_str("note_name")
+                .map(StringMatcher::parse)
+                .unwrap_or(StringMatcher::Any),
+            octave: fields
+                .get_str("octave")
+                .map(I32Matcher::parse)
+                .unwrap_or(I32Matcher::Any),
+            source_midi_note: fields
+                .get_str("source_midi_note")
+                .map(U8Matcher::parse)
+                .unwrap_or(U8Matcher::Any),
+        })
+    }
+
+    fn matches(&self, context: &OpllPseudoDrumContext<'_>) -> bool {
+        self.macro_symbol
+            .matches_optional(context.macro_symbol.map(|ch| ch.to_string()).as_deref())
+            && self.source_track.matches(context.source_track)
+            && self.envelope.matches_optional(context.envelope)
+            && self.source_tone.matches_optional(context.source_tone)
+            && self.effective_tone.matches_optional(context.effective_tone)
+            && self
+                .note_name
+                .matches_optional(context.note_name.map(|ch| ch.to_string()).as_deref())
+            && self.octave.matches_optional(context.octave)
+            && self
+                .source_midi_note
+                .matches_optional(context.source_midi_note)
+    }
+}
+
+pub struct OpllPseudoDrumContext<'a> {
+    pub source_track: &'a str,
+    pub macro_symbol: Option<char>,
+    pub envelope: Option<u8>,
+    pub source_tone: Option<u8>,
+    pub effective_tone: Option<u8>,
+    pub note_name: Option<char>,
+    pub octave: Option<i32>,
+    pub source_midi_note: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -714,16 +1378,22 @@ enum StringMatcher {
     Many(BTreeSet<String>),
 }
 
+impl Default for StringMatcher {
+    fn default() -> Self {
+        Self::Any
+    }
+}
+
 impl StringMatcher {
     fn parse(value: &Value) -> Self {
         match value {
             Value::String(value) if value == "*" => Self::Any,
-            Value::String(value) => Self::One(value.clone()),
+            Value::String(value) => Self::One(value.to_ascii_lowercase()),
             Value::Sequence(items) => {
                 let values: BTreeSet<String> = items
                     .iter()
                     .filter_map(yaml_string)
-                    .map(str::to_string)
+                    .map(str::to_ascii_lowercase)
                     .collect();
                 if values.is_empty() {
                     Self::Any
@@ -736,10 +1406,18 @@ impl StringMatcher {
     }
 
     fn matches(&self, value: &str) -> bool {
+        let normalized = value.to_ascii_lowercase();
         match self {
             Self::Any => true,
-            Self::One(expected) => expected == value,
-            Self::Many(values) => values.contains(value),
+            Self::One(expected) => expected == &normalized,
+            Self::Many(values) => values.contains(&normalized),
+        }
+    }
+
+    fn matches_optional(&self, value: Option<&str>) -> bool {
+        match self {
+            Self::Any => true,
+            _ => value.map(|value| self.matches(value)).unwrap_or(false),
         }
     }
 }
@@ -750,6 +1428,12 @@ enum U8Matcher {
     One(u8),
     Many(BTreeSet<u8>),
     Range { min: u8, max: u8 },
+}
+
+impl Default for U8Matcher {
+    fn default() -> Self {
+        Self::Any
+    }
 }
 
 impl U8Matcher {
@@ -777,6 +1461,63 @@ impl U8Matcher {
             Self::One(expected) => *expected == value,
             Self::Many(values) => values.contains(&value),
             Self::Range { min, max } => (*min..=*max).contains(&value),
+        }
+    }
+
+    fn matches_optional(&self, value: Option<u8>) -> bool {
+        match self {
+            Self::Any => true,
+            _ => value.map(|value| self.matches(value)).unwrap_or(false),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum I32Matcher {
+    Any,
+    One(i32),
+    Many(BTreeSet<i32>),
+    Range { min: i32, max: i32 },
+}
+
+impl Default for I32Matcher {
+    fn default() -> Self {
+        Self::Any
+    }
+}
+
+impl I32Matcher {
+    fn parse(value: &Value) -> Self {
+        match value {
+            Value::String(value) if value == "*" => Self::Any,
+            Value::String(value) => parse_i32_range(value)
+                .unwrap_or_else(|| value.parse::<i32>().map(Self::One).unwrap_or(Self::Any)),
+            Value::Number(_) => yaml_i32(value).map(Self::One).unwrap_or(Self::Any),
+            Value::Sequence(items) => {
+                let values: BTreeSet<i32> = items.iter().filter_map(yaml_i32).collect();
+                if values.is_empty() {
+                    Self::Any
+                } else {
+                    Self::Many(values)
+                }
+            }
+            _ => Self::Any,
+        }
+    }
+
+    fn matches(&self, value: i32) -> bool {
+        match self {
+            Self::Any => true,
+            Self::One(expected) => *expected == value,
+            Self::Many(values) => values.contains(&value),
+            Self::Range { min, max } => (*min..=*max).contains(&value),
+        }
+    }
+
+    fn matches_optional(&self, value: Option<i32>) -> bool {
+        match self {
+            Self::Any => true,
+            _ => value.map(|value| self.matches(value)).unwrap_or(false),
         }
     }
 }
@@ -844,10 +1585,45 @@ pub fn emit_config_skeleton(song: &SongIr) -> String {
             }
         }
     }
+    for (family, envelope_id, spelling) in &scc_opll_envelopes {
+        if !matches!(
+            (*family, *spelling),
+            (
+                SourceFamily::Scc | SourceFamily::Opll,
+                crate::ir::AtSpelling::AtE | crate::ir::AtSpelling::AtR
+            )
+        ) {
+            continue;
+        }
+        let Some(env) = song.envelopes.e.get(envelope_id) else {
+            continue;
+        };
+        for command in &env.commands {
+            if let ECommand::ToneChange(tone) = command {
+                match family {
+                    SourceFamily::Scc => {
+                        scc_tones.insert(*tone);
+                    }
+                    SourceFamily::Opll => {
+                        opll_tones.insert(*tone);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
     let mut out = String::new();
-    out.push_str("version: 0.3\n");
+    out.push_str("version: 0.4.1\n");
     out.push_str("profile_name: observed-skeleton\n\n");
+    out.push_str("pitch_glide:\n");
+    out.push_str("  enabled: false\n");
+    out.push_str("  output: pitch_bend\n");
+    out.push_str("  pitch_bend_range_semitones: 24\n");
+    out.push_str("  pitch_bend_range_cents: 0\n");
+    out.push_str("  emit_rpn_pitch_bend_range: true\n");
+    out.push_str("  emit_rpn_null_after_setting: true\n");
+    out.push_str("  shared_channel_policy: warn_and_suppress\n\n");
     out.push_str("psg_envelope_map:\n  enabled: true\n  envelopes:\n");
     if psg_envelopes.is_empty() {
         out.push_str("    {}\n");
@@ -939,6 +1715,25 @@ fn default_family_for_track(track_id: &str, opll_mode: i32, kind: TrackKind) -> 
     }
 }
 
+fn normalize_configured_source_family(
+    track_id: &str,
+    kind: TrackKind,
+    family: SourceFamily,
+) -> SourceFamily {
+    if family == SourceFamily::Rhythm && kind != TrackKind::Rhythm && is_opll_track_id(track_id) {
+        SourceFamily::Opll
+    } else {
+        family
+    }
+}
+
+fn is_opll_track_id(track_id: &str) -> bool {
+    matches!(
+        track_id,
+        "9" | "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h"
+    )
+}
+
 fn default_opll_tones() -> BTreeMap<u8, ToneMapEntry> {
     let programs = [
         (0, "violin", 40),
@@ -982,6 +1777,45 @@ fn default_opll_tones() -> BTreeMap<u8, ToneMapEntry> {
         },
     );
     out
+}
+
+fn default_opll_pseudo_drum_maps() -> BTreeMap<String, OpllPseudoDrumMap> {
+    let mut maps = BTreeMap::new();
+    let rules = [
+        ("kick", "b", 36),
+        ("snare", "s", 38),
+        ("closed_hat", "h", 42),
+        ("open_hat", "o", 46),
+        ("tom_very_high", "q", 50),
+        ("tom_high", "w", 48),
+        ("tom_mid_high", "t", 47),
+        ("tom_middle", "m", 45),
+        ("tom_mid_low", "l", 43),
+        ("tom_low", "z", 41),
+        ("tom_very_low", "x", 41),
+    ]
+    .into_iter()
+    .map(|(name, symbol, note)| OpllPseudoDrumRule {
+        name: name.to_string(),
+        matcher: OpllPseudoDrumMatcher {
+            macro_symbol: StringMatcher::One(symbol.to_string()),
+            ..OpllPseudoDrumMatcher::default()
+        },
+        drum: OpllPseudoDrumEntry {
+            note,
+            velocity: DrumVelocity::SourceVolume,
+        },
+    })
+    .collect();
+    maps.insert(
+        "default_opll_pseudo".to_string(),
+        OpllPseudoDrumMap {
+            output: OpllPseudoDrumOutput::default_with_channel(9),
+            hit_grouping: OpllPseudoDrumHitGrouping::default_enabled(),
+            rules,
+        },
+    );
+    maps
 }
 
 fn default_macros() -> BTreeMap<String, Vec<SmfRequest>> {
@@ -1107,6 +1941,16 @@ fn parse_range(value: &str) -> Option<U8Matcher> {
     let min = parse_u8_scalar(lhs.trim())?;
     let max = parse_u8_scalar(rhs.trim())?;
     Some(U8Matcher::Range {
+        min: min.min(max),
+        max: min.max(max),
+    })
+}
+
+fn parse_i32_range(value: &str) -> Option<I32Matcher> {
+    let (lhs, rhs) = value.split_once("..")?;
+    let min = parse_i32_scalar(lhs.trim())?;
+    let max = parse_i32_scalar(rhs.trim())?;
+    Some(I32Matcher::Range {
         min: min.min(max),
         max: min.max(max),
     })

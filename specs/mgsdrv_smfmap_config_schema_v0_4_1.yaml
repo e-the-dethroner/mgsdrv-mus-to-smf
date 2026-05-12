@@ -1,0 +1,76 @@
+version: 0.4.1
+extends: mgsdrv_smfmap_config_schema_v0_4.yaml
+
+sections:
+  pitch_glide:
+    description: >
+      Opt-in rendering for MGSC111 _target pitch glide. The output is MIDI Pitch
+      Bend, so it is channel-wide and should normally be used only when each
+      glide source track has its own MIDI channel.
+    fields:
+      enabled:
+        type: bool
+        default: false
+      output:
+        type: enum
+        allowed_values: [pitch_bend]
+        default: pitch_bend
+      pitch_bend_range_semitones:
+        type: u8
+        range: [1, 48]
+        default: 24
+      pitch_bend_range_cents:
+        type: u8
+        range: [0, 99]
+        default: 0
+      emit_rpn_pitch_bend_range:
+        type: bool
+        default: true
+      emit_rpn_null_after_setting:
+        type: bool
+        default: true
+      shared_channel_policy:
+        type: enum
+        allowed_values: [error, warn_and_suppress, allow_unsafe]
+        default: warn_and_suppress
+      range_policy:
+        type: enum
+        allowed_values: [clamp, error_if_exceeded, auto_expand_to_48]
+        default: clamp
+      curve:
+        fields:
+          shape:
+            type: enum
+            allowed_values: [linear]
+            default: linear
+          event_rate_hz:
+            type: u16
+            range: [1, 240]
+            default: 60
+          min_delta_cents:
+            type: u16
+            range: [0, 1200]
+            default: 4
+          include_start_point:
+            type: bool
+            default: true
+          include_end_point:
+            type: bool
+            default: true
+      reset:
+        fields:
+          at_note_end:
+            type: bool
+            default: true
+          before_next_note_on:
+            type: bool
+            default: true
+          at_track_end:
+            type: bool
+            default: true
+
+diagnostics:
+  pitch_glide:
+    - unsupported_commands entry when disabled
+    - unsupported_commands entry when shared-channel policy suppresses rendering
+    - unsupported_commands entry when clamp policy handles an out-of-range bend

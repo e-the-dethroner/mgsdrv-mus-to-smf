@@ -280,7 +280,7 @@ unsupported_commands:
     ho: ignore_with_warning
     hf: ignore_with_warning
     hi: ignore_with_warning
-    pitch_glide_underscore: ignore_with_warning
+    pitch_glide_underscore: opt_in_pitch_bend_or_ignore_with_warning
     register_write_y: ignore_with_warning
     fm_total_level_at_l: ignore_with_warning
     sustain_so_sf: ignore_with_warning

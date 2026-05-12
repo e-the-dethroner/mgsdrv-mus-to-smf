@@ -1,6 +1,6 @@
 # `.smfmap.yaml` 使い方ガイド
 
-この文書は、`mgs2smf` の v0.3 `smfmap` 設定ファイルの使い方を説明します。
+この文書は、`mgs2smf` の v0.4.1 `smfmap` 設定ファイルの使い方を説明します。
 
 `smfmap` は曲ごとの変換設定です。MUS ファイルは MGSDRV/MGSC111 で読める形のままにして、MIDI 出力だけを補正します。たとえば Program Change、CC、手動 MIDI イベント、未対応レジスタ書き込みの診断などを曲ごとに指定できます。
 
@@ -56,9 +56,10 @@ mgs2smf song.mus -o song.mid --config song.smfmap.yaml --diagnostics song.json
 スケルトンには、MUS 内で実際に観測されたものだけが入ります。
 
 - PSG の `@N`、`@eN`、`@rN` envelope 番号
-- SCC の `@N` tone 番号
-- OPLL の `@N` tone 番号
+- SCC の `@N` tone 番号、および実際に使われた SCC `@eN` 内の tone change
+- OPLL の `@N` tone 番号、および実際に使われた OPLL `@eN` 内の tone change
 - `yR,D` レジスタ書き込み
+- 既定では無効の `pitch_glide` セクション
 
 ## SMF 設定
 
@@ -81,11 +82,11 @@ smf:
 
 ```yaml
 tracks:
-  "1": { family: psg,       midi_channel: 0  }
-  "2": { family: psg,       midi_channel: 1  }
-  "3": { family: psg_noise, midi_channel: 2  }
-  "4": { family: scc,       midi_channel: 3  }
-  "9": { family: opll,      midi_channel: 8  }
+  "1": { source_family: psg,       midi_channel: 0  }
+  "2": { source_family: psg,       midi_channel: 1  }
+  "3": { source_family: psg_noise, midi_channel: 2  }
+  "4": { source_family: scc,       midi_channel: 3  }
+  "9": { source_family: opll,      midi_channel: 8  }
 ```
 
 既定の動作:
@@ -97,6 +98,19 @@ tracks:
 - `rhythm`: `@` コマンドは無視され、診断に出ます。
 
 重要: PSG の `@N` は `tone_map` に流しません。そのため PSG の `@N` から Program Change は出ません。
+
+`family` は従来互換の短縮名としても使えます。v0.4 では、物理的な入力元を `source_family`、SMF 出力上の役割を `render_role` として分けられます。
+
+```yaml
+tracks:
+  "h":
+    source_family: opll
+    render_role: drum
+    drum_map: default_opll_pseudo
+    midi_channel: 9   # zero_based: MIDI ch.10
+```
+
+`family: rhythm` は OPLL 系トラックでは短縮記法として扱われ、概ね `source_family: opll`、`render_role: drum`、`drum_map: default_opll_pseudo` として解釈されます。ただし、正式な `#opll_mode 1` rhythm track とは別物です。
 
 ## 手動 SMF directive
 
@@ -257,7 +271,7 @@ tone_map:
           - pc: { program: 38 }
 ```
 
-同じ tick のイベント順は v0.3 の方針に従います。NoteOff、Bank、Program、RPN/NRPN、CC、PitchBend、初期 expression、meta、NoteOn、envelope curve の順です。
+同じ tick のイベント順は v0.4.1 の方針に従います。NoteOff、Bank、Program、RPN/NRPN、CC、PitchBend、初期 expression、meta、NoteOn、envelope curve の順です。
 
 `respect_at_hash_rom_assign` が true の場合、OPLL の `@#N = M` assignment を反映します。
 
@@ -325,6 +339,90 @@ psg_noise_map:
         note: 38
         velocity: 100
 ```
+
+## OPLL pseudo drum map
+
+`#opll_mode 0` の OPLL トラックを疑似ドラムとして使っている曲では、`opll_pseudo_drum_map` で元 note を GM drum note へ置換できます。この機能は既定では無効です。
+
+```yaml
+tracks:
+  "f": { source_family: opll, render_role: drum, drum_map: default_opll_pseudo, midi_channel: 9 }
+  "g": { source_family: opll, render_role: drum, drum_map: default_opll_pseudo, midi_channel: 9 }
+  "h": { source_family: opll, render_role: drum, drum_map: default_opll_pseudo, midi_channel: 9 }
+
+opll_pseudo_drum_map:
+  enabled: true
+  maps:
+    default_opll_pseudo:
+      output:
+        midi_channel: 9
+        mode: replace
+        unmatched: warn_and_drop
+        suppress_tone_map: true
+        suppress_program_change: true
+      hit_grouping:
+        enabled: true
+        suppress_continuations:
+          - macro_continuation
+          - slur_ampersand
+      rules:
+        - { name: kick,       match: { macro_symbol: "b" }, drum: { note: 36, velocity: source_volume } }
+        - { name: snare,      match: { macro_symbol: "s" }, drum: { note: 38, velocity: source_volume } }
+        - { name: closed_hat, match: { macro_symbol: "h" }, drum: { note: 42, velocity: source_volume } }
+        - { name: open_hat,   match: { macro_symbol: "o" }, drum: { note: 46, velocity: source_volume } }
+```
+
+`macro_symbol` は `*b15` や `*s02` のような `#macro_offset` 付きマクロ参照から得られる記号です。v0.4 では次の match key を使えます。
+
+- `macro_symbol`
+- `track` または `source_track`
+- `envelope`
+- `source_tone`
+- `effective_tone` または `effective_rom_tone`
+- `note_name`
+- `octave`
+- `source_midi_note`
+
+`output.mode` は `replace`、`add`、`passthrough` を指定できます。通常の疑似ドラム用途では `replace` を推奨します。`suppress_tone_map: true` にすると、drum role の OPLL `@N` は Program Change を出さず、drum rule の判定材料としてだけ使われます。
+
+`hit_grouping.enabled: true` にすると、マクロ内の複数 note を1つの打楽器ヒットとして扱えます。現在の実装では、次のマクロ開始または休符後の note で新しいヒットになり、`macro_continuation` と `slur_ampersand` を継続音として抑制できます。`pitch_slide_underscore` は drum hit grouping 用の予約値です。melody track の `_` pitch glide 出力は、別の `pitch_glide` セクションで制御します。
+
+## Pitch Glide
+
+MGSC111 の `_target` pitch glide は MIDI Pitch Bend として出力できます。この機能は既定では無効です。Pitch Bend は MIDI channel の状態なので、同じ MIDI channel で鳴っている他の note も一緒に曲がるためです。
+
+使う場合は、glide を含む track を個別の MIDI channel に割り当ててから有効にします。
+
+```yaml
+tracks:
+  "6": { source_family: scc, midi_channel: 3, midi_port: 0 }
+  "7": { source_family: scc, midi_channel: 4, midi_port: 0 }
+  "8": { source_family: scc, midi_channel: 5, midi_port: 0 }
+
+pitch_glide:
+  enabled: true
+  output: pitch_bend
+  pitch_bend_range_semitones: 24
+  pitch_bend_range_cents: 0
+  emit_rpn_pitch_bend_range: true
+  emit_rpn_null_after_setting: true
+  curve:
+    shape: linear
+    event_rate_hz: 60
+    min_delta_cents: 4
+    include_start_point: true
+    include_end_point: true
+  reset:
+    at_note_end: true
+    before_next_note_on: true
+    at_track_end: true
+  shared_channel_policy: warn_and_suppress
+  range_policy: clamp
+```
+
+有効時は、実際に glide を出す channel にだけ RPN Pitch Bend Sensitivity を出し、その後、元 note から `_` の target note へ線形の Pitch Bend curve を出します。pitch glide note が `&` でつながっている場合は、最初の Note On を glide group 全体で保持します。既定の bend range は 24 semitones です。長い slur group がこの範囲を超える曲では `range_policy: auto_expand_to_48` を使えます。`range_policy: clamp` の場合は診断を出して bend 値を丸めます。
+
+曲専用の厳密な設定では `shared_channel_policy: error` を推奨します。`allow_unsafe` は、同じ MIDI channel の note がまとめて曲がることを意図している場合だけ使ってください。
 
 ## SCC / OPLL envelope map
 
@@ -395,7 +493,7 @@ diagnostics には次の情報が入ります。
 
 ## CLI override
 
-v0.3 関連の主なオプション:
+v0.4 関連の主なオプション:
 
 ```text
 --config <path>
@@ -427,7 +525,7 @@ v0.3 関連の主なオプション:
 `song.smfmap.yaml`:
 
 ```yaml
-version: 0.3
+version: 0.4.1
 
 tone_map:
   scc:

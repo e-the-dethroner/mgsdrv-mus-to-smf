@@ -1,6 +1,6 @@
 # `.smfmap.yaml` Guide
 
-This document explains how to use the v0.3 `smfmap` configuration layer for `mgs2smf`.
+This document explains how to use the v0.4.1 `smfmap` configuration layer for `mgs2smf`.
 
 `smfmap` is a per-song mapping file. It lets you keep the MUS file compatible with MGSDRV/MGSC111 while adding converter-only choices for MIDI output, such as Program Change mapping, CC events, manual MIDI events, and diagnostics for unsupported chip register writes.
 
@@ -57,9 +57,10 @@ mgs2smf song.mus -o song.mid --config song.smfmap.yaml --diagnostics song.json
 The skeleton includes only usage actually found in the MUS file:
 
 - PSG envelope numbers from `@N`, `@eN`, and `@rN`.
-- SCC tones from `@N`.
-- OPLL tones from `@N`.
+- SCC tones from `@N` and tone changes inside actually used SCC `@eN` envelopes.
+- OPLL tones from `@N` and tone changes inside actually used OPLL `@eN` envelopes.
 - Register writes from `yR,D`.
+- The `pitch_glide` section, disabled by default.
 
 ## SMF Settings
 
@@ -82,11 +83,11 @@ smf:
 
 ```yaml
 tracks:
-  "1": { family: psg,       midi_channel: 0  }
-  "2": { family: psg,       midi_channel: 1  }
-  "3": { family: psg_noise, midi_channel: 2  }
-  "4": { family: scc,       midi_channel: 3  }
-  "9": { family: opll,      midi_channel: 8  }
+  "1": { source_family: psg,       midi_channel: 0  }
+  "2": { source_family: psg,       midi_channel: 1  }
+  "3": { source_family: psg_noise, midi_channel: 2  }
+  "4": { source_family: scc,       midi_channel: 3  }
+  "9": { source_family: opll,      midi_channel: 8  }
 ```
 
 Default family behavior:
@@ -98,6 +99,19 @@ Default family behavior:
 - `rhythm`: `@` commands are ignored and reported.
 
 Important: PSG `@N` is intentionally not routed to `tone_map`, so it will not produce Program Change events.
+
+`family` is still accepted as a compatibility shorthand. In v0.4, the physical input source can be configured separately from the SMF output role using `source_family` and `render_role`.
+
+```yaml
+tracks:
+  "h":
+    source_family: opll
+    render_role: drum
+    drum_map: default_opll_pseudo
+    midi_channel: 9   # zero_based: MIDI ch.10
+```
+
+For OPLL-family tracks, `family: rhythm` is treated as a shorthand roughly equivalent to `source_family: opll`, `render_role: drum`, and `drum_map: default_opll_pseudo`. This is distinct from native `#opll_mode 1` rhythm tracks.
 
 ## Manual SMF Directives
 
@@ -258,7 +272,7 @@ tone_map:
           - pc: { program: 38 }
 ```
 
-Event order at the same tick follows the v0.3 policy: NoteOff, Bank, Program, RPN/NRPN, CC, PitchBend, initial expression, meta, NoteOn, envelope curve.
+Event order at the same tick follows the v0.4.1 policy: NoteOff, Bank, Program, RPN/NRPN, CC, PitchBend, initial expression, meta, NoteOn, envelope curve.
 
 OPLL `@#N = M` assignments are honored when `respect_at_hash_rom_assign` is true:
 
@@ -326,6 +340,90 @@ psg_noise_map:
         note: 38
         velocity: 100
 ```
+
+## OPLL Pseudo Drum Map
+
+Some `#opll_mode 0` songs use normal OPLL tracks as pseudo drum parts. `opll_pseudo_drum_map` can replace those source notes with GM drum notes. This feature is disabled by default.
+
+```yaml
+tracks:
+  "f": { source_family: opll, render_role: drum, drum_map: default_opll_pseudo, midi_channel: 9 }
+  "g": { source_family: opll, render_role: drum, drum_map: default_opll_pseudo, midi_channel: 9 }
+  "h": { source_family: opll, render_role: drum, drum_map: default_opll_pseudo, midi_channel: 9 }
+
+opll_pseudo_drum_map:
+  enabled: true
+  maps:
+    default_opll_pseudo:
+      output:
+        midi_channel: 9
+        mode: replace
+        unmatched: warn_and_drop
+        suppress_tone_map: true
+        suppress_program_change: true
+      hit_grouping:
+        enabled: true
+        suppress_continuations:
+          - macro_continuation
+          - slur_ampersand
+      rules:
+        - { name: kick,       match: { macro_symbol: "b" }, drum: { note: 36, velocity: source_volume } }
+        - { name: snare,      match: { macro_symbol: "s" }, drum: { note: 38, velocity: source_volume } }
+        - { name: closed_hat, match: { macro_symbol: "h" }, drum: { note: 42, velocity: source_volume } }
+        - { name: open_hat,   match: { macro_symbol: "o" }, drum: { note: 46, velocity: source_volume } }
+```
+
+`macro_symbol` comes from `#macro_offset` references such as `*b15` or `*s02`. v0.4 supports these match keys:
+
+- `macro_symbol`
+- `track` or `source_track`
+- `envelope`
+- `source_tone`
+- `effective_tone` or `effective_rom_tone`
+- `note_name`
+- `octave`
+- `source_midi_note`
+
+`output.mode` can be `replace`, `add`, or `passthrough`; `replace` is recommended for pseudo drum use. With `suppress_tone_map: true`, OPLL `@N` on drum-role tracks is kept as rule-matching state and does not emit Program Change.
+
+With `hit_grouping.enabled: true`, multiple notes inside one macro can be treated as a single drum hit. The current implementation starts a new hit at the next macro call or after a rest, and can suppress `macro_continuation` and `slur_ampersand` continuations. `pitch_slide_underscore` is reserved for drum hit grouping; melodic `_` pitch glide rendering is controlled separately by `pitch_glide`.
+
+## Pitch Glide
+
+MGSC111 `_target` pitch glide can be rendered as MIDI Pitch Bend. This is disabled by default because Pitch Bend is channel state: it bends every note currently sounding on the same MIDI channel.
+
+Enable it only for tracks that have independent MIDI channels:
+
+```yaml
+tracks:
+  "6": { source_family: scc, midi_channel: 3, midi_port: 0 }
+  "7": { source_family: scc, midi_channel: 4, midi_port: 0 }
+  "8": { source_family: scc, midi_channel: 5, midi_port: 0 }
+
+pitch_glide:
+  enabled: true
+  output: pitch_bend
+  pitch_bend_range_semitones: 24
+  pitch_bend_range_cents: 0
+  emit_rpn_pitch_bend_range: true
+  emit_rpn_null_after_setting: true
+  curve:
+    shape: linear
+    event_rate_hz: 60
+    min_delta_cents: 4
+    include_start_point: true
+    include_end_point: true
+  reset:
+    at_note_end: true
+    before_next_note_on: true
+    at_track_end: true
+  shared_channel_policy: warn_and_suppress
+  range_policy: clamp
+```
+
+When enabled, the converter emits RPN Pitch Bend Sensitivity on channels that actually render glide, then emits a linear Pitch Bend curve from the source note to the `_` target note. If pitch-glide notes are joined by `&`, the first Note On is held across the glide group. The default range is 24 semitones. If a long slur group exceeds that range, use `range_policy: auto_expand_to_48` for that song, or keep `range_policy: clamp` to report a diagnostic and clamp the bend.
+
+Use `shared_channel_policy: error` for strict song-specific configs. Use `allow_unsafe` only when you intentionally want all notes on that MIDI channel to bend together.
 
 ## SCC and OPLL Envelope Map
 
@@ -396,7 +494,7 @@ Diagnostics include:
 
 ## CLI Overrides
 
-Useful v0.3 options:
+Useful v0.4 options:
 
 ```text
 --config <path>
@@ -428,7 +526,7 @@ Useful v0.3 options:
 `song.smfmap.yaml`:
 
 ```yaml
-version: 0.3
+version: 0.4.1
 
 tone_map:
   scc:

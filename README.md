@@ -41,14 +41,16 @@ Implemented MVP:
 - Notes, rests, octave, configurable `o4c`, default length, `%N`, dotted lengths, ties, slur with same-pitch merge, `t`, `v`, relative volume, `q`, `@N` tone designation, `@eN`, `@rN`, loops, and `!`.
 - `[0 ...]` infinite loops are finite-rendered to a common global loop horizon; MSXPlay-style header comments such as `;[gain=1.0 ...]` default to two global loops unless `loop=N` or `--loop-count N` overrides it.
 - `@N` can render as GM Program Change with `--tone-policy gm_program` or as MIDI text meta with `--tone-policy text_meta`.
-- Unsupported MML commands from the spec (`m`, `s`, `n`, `/`, `\`, `p`, `h`, `ho`, `hf`, `hi`, `_`, `y`, `so`, `sf`, `ko`, `kf`, `$`, `@p`, `@l`, `@\`, `@f`, `@o`) are ignored with classified diagnostics.
+- Unsupported MML commands from the spec (`m`, `s`, `n`, `/`, `\`, `p`, `h`, `ho`, `hf`, `hi`, `y`, `so`, `sf`, `ko`, `kf`, `$`, `@p`, `@l`, `@\`, `@f`, `@o`) are ignored with classified diagnostics.
 - `#opll_mode 1` rhythm tracks `f` / `r` with GM drum notes for `b`, `s`, `m`, `c`, `h` when `--rhythm-map gm` is active.
 - `--loop-marker-name start:end` customizes infinite loop marker names.
 - `--channel-overflow error|shared|multi_port`; `shared` reuses MIDI channels and suppresses CC envelopes on shared channels, while `multi_port` emits MIDI Port meta events.
 - `.smfmap.yaml` loading via `--config` or discovered `.smfmap.yaml` / `*.smfmap.yaml` files.
 - `;@smf` manual SMF directives for `pc`, `bank`, `cc`, `pb`, `rpn`, `nrpn`, `marker`, `text`, `macro`, and `reset`, with optional `track=`, `channel=`, and `conductor` targets.
-- v0.3 family-aware `@N` dispatch: PSG/PSG noise select envelopes, while SCC/OPLL route `@N` through `tone_map`; PSG `@N` does not emit Program Change.
+- v0.4 family-aware `@N` dispatch: PSG/PSG noise select envelopes, while SCC/OPLL route `@N` through `tone_map`; PSG `@N` does not emit Program Change.
 - PSG noise drum-map output, SCC/OPLL envelope-map output, and register-rule emission from `yR,D` when enabled by `.smfmap.yaml` / `--register-map on`.
+- v0.4 OPLL pseudo drum maps can route explicit `render_role: drum` OPLL tracks through GM drum notes using macro/tone/envelope/note match rules.
+- v0.4.1 `pitch_glide` can render MGSC111 `_target` pitch glide as opt-in MIDI Pitch Bend with RPN pitch bend range setup.
 - `yR,D` register writes are preserved in IR and reported in diagnostics by default without emitting SMF events.
 - `--emit-config-skeleton` writes a YAML skeleton for observed `@`, `@e`, `@r`, and `y` usage.
 - SMF Type 0/1 output, with Type 1 using a conductor track plus one MIDI track per source track, tempo/time/key/text meta events, note velocity from `v`, and envelope approximation via CC #11 by default.

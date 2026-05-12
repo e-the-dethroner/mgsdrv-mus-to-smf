@@ -1,0 +1,485 @@
+version: 0.4
+schema_name: mgsdrv-mus-to-smf-smfmap
+summary: >-
+  YAML configuration schema for MGSDRV/MGSC111 MUS to SMF converter extensions:
+  manual SMF directives, family-aware @ command dispatch, PSG envelope mapping,
+  SCC/OPLL tone mapping, OPLL pseudo drum mapping, and y register-write
+  diagnostics/rules.
+
+numbering:
+  program_numbering_default: zero_based
+  channel_numbering_default: zero_based
+  source_tone_numbering: mgsc_zero_based
+
+smf:
+  type:
+    type: integer
+    default: 1
+    allowed: [0, 1]
+  ppq:
+    type: integer
+    default: 3600
+  program_numbering:
+    type: enum
+    default: zero_based
+    allowed: [zero_based, one_based]
+  channel_numbering:
+    type: enum
+    default: zero_based
+    allowed: [zero_based, one_based]
+  channel_allocation:
+    policy:
+      type: enum
+      default: one_source_track_per_channel
+      allowed: [one_source_track_per_channel, shared, multi_port]
+    overflow_policy:
+      type: enum
+      default: error
+      allowed: [error, shared, multi_port]
+    rhythm_channel_zero_based:
+      type: integer
+      default: 9
+      range: [0, 15]
+  event_order:
+    type: list
+    default:
+      - note_off
+      - bank_select
+      - program_change
+      - rpn_nrpn
+      - cc
+      - pitch_bend
+      - initial_expression
+      - meta
+      - note_on
+      - envelope_curve
+
+manual_smf:
+  enabled:
+    type: boolean
+    default: true
+  comment_prefix:
+    type: string
+    default: ";@smf"
+  unknown_command_policy:
+    type: enum
+    default: error
+    allowed: [error, warn_and_ignore]
+  allowed_commands:
+    default: [pc, bank, cc, pb, rpn, nrpn, marker, text, macro, reset]
+  numeric_formats:
+    default: [decimal, 0x_hex, dollar_hex, percent_binary]
+  default_target:
+    in_track_line: current_track
+    top_level: conductor_requires_explicit_target
+
+tracks:
+  type: map
+  key: source_track_id
+  value:
+    source_family:
+      type: enum
+      allowed: [psg, psg_noise, scc, opll, rhythm]
+    family:
+      type: enum
+      compatibility_alias_for: source_family
+      rhythm_shorthand_for_opll:
+        source_family: opll
+        render_role: drum
+        drum_map: default_opll_pseudo
+      allowed: [psg, psg_noise, scc, opll, rhythm]
+    render_role:
+      type: enum
+      default: melody
+      allowed: [melody, drum]
+    drum_map:
+      type: string
+      default_for_opll_drum_role: default_opll_pseudo
+    midi_channel:
+      type: integer
+      range: [0, 15]
+    midi_port:
+      type: integer
+      default: 0
+    at_command_policy:
+      type: enum
+      allowed: [psg_envelope, psg_envelope_or_drum, tone_map, rhythm, ignore]
+  defaults_by_opll_mode:
+    opll_mode_0:
+      "1": { family: psg, at_command_policy: psg_envelope }
+      "2": { family: psg, at_command_policy: psg_envelope }
+      "3": { family: psg_noise, at_command_policy: psg_envelope_or_drum }
+      "4": { family: scc, at_command_policy: tone_map }
+      "5": { family: scc, at_command_policy: tone_map }
+      "6": { family: scc, at_command_policy: tone_map }
+      "7": { family: scc, at_command_policy: tone_map }
+      "8": { family: scc, at_command_policy: tone_map }
+      "9": { family: opll, at_command_policy: tone_map }
+      "a": { family: opll, at_command_policy: tone_map }
+      "b": { family: opll, at_command_policy: tone_map }
+      "c": { family: opll, at_command_policy: tone_map }
+      "d": { family: opll, at_command_policy: tone_map }
+      "e": { family: opll, at_command_policy: tone_map }
+      "f": { family: opll, at_command_policy: tone_map }
+      "g": { family: opll, at_command_policy: tone_map }
+      "h": { family: opll, at_command_policy: tone_map }
+    opll_mode_1:
+      "1": { family: psg, at_command_policy: psg_envelope }
+      "2": { family: psg, at_command_policy: psg_envelope }
+      "3": { family: psg_noise, at_command_policy: psg_envelope_or_drum }
+      "4": { family: scc, at_command_policy: tone_map }
+      "5": { family: scc, at_command_policy: tone_map }
+      "6": { family: scc, at_command_policy: tone_map }
+      "7": { family: scc, at_command_policy: tone_map }
+      "8": { family: scc, at_command_policy: tone_map }
+      "9": { family: opll, at_command_policy: tone_map }
+      "a": { family: opll, at_command_policy: tone_map }
+      "b": { family: opll, at_command_policy: tone_map }
+      "c": { family: opll, at_command_policy: tone_map }
+      "d": { family: opll, at_command_policy: tone_map }
+      "e": { family: opll, at_command_policy: tone_map }
+      "f": { family: rhythm, at_command_policy: rhythm }
+      "r": { family: rhythm, at_command_policy: rhythm }
+
+at_command_dispatch:
+  psg:
+    "@": { action: select_psg_envelope }
+    "@e": { action: select_psg_envelope }
+    "@r": { action: select_psg_envelope }
+  psg_noise:
+    "@": { action: select_psg_envelope, allow_drum_map: true }
+    "@e": { action: select_psg_envelope, allow_drum_map: true }
+    "@r": { action: select_psg_envelope, allow_drum_map: true }
+  scc:
+    "@": { action: select_tone }
+    "@e": { action: apply_envelope_to_current_tone }
+    "@r": { action: apply_envelope_to_current_tone }
+  opll:
+    "@": { action: select_tone }
+    "@e": { action: apply_envelope_to_current_tone }
+    "@r": { action: apply_envelope_to_current_tone }
+  rhythm:
+    "@": { action: ignore_and_report }
+    "@e": { action: ignore_and_report }
+    "@r": { action: ignore_and_report }
+
+psg_envelope_map:
+  enabled:
+    type: boolean
+    default: true
+  undefined_policy:
+    type: enum
+    default: warn_and_no_envelope
+    allowed: [warn_and_no_envelope, warn_and_keep_previous, error]
+  default:
+    source:
+      type: enum
+      default: mus_definition
+      allowed: [mus_definition, config_override]
+    emit_expression_cc:
+      type: boolean
+      default: true
+    expression_cc:
+      type: integer
+      default: 11
+      range: [0, 127]
+    trigger:
+      on_at_command:
+        type: enum
+        default: select_only
+        allowed: [select_only, select_and_emit_initial_cc]
+      on_note_on:
+        type: enum
+        default: restart_envelope
+        allowed: [restart_envelope, continue_envelope]
+    volume_scale:
+      mgsc_min: { type: integer, default: 0 }
+      mgsc_max: { type: integer, default: 15 }
+      midi_min: { type: integer, default: 0 }
+      midi_max: { type: integer, default: 127 }
+      curve:
+        type: enum
+        default: linear
+        allowed: [linear]
+    loop_policy:
+      finite_note_duration:
+        type: enum
+        default: render_until_note_off
+        allowed: [render_until_note_off, one_cycle]
+      infinite_envelope_loop:
+        type: enum
+        default: render_until_note_off
+        allowed: [render_until_note_off, one_cycle, error]
+    mode_noise_policy:
+      tone_only: { type: enum, default: ignore, allowed: [ignore, report, text_meta] }
+      noise_only: { type: enum, default: report, allowed: [ignore, report, text_meta] }
+      tone_and_noise: { type: enum, default: report, allowed: [ignore, report, text_meta] }
+      emit_meta_text: { type: boolean, default: true }
+  envelopes:
+    type: map
+    key: envelope_number_string
+    value:
+      name: { type: string }
+      override:
+        expression_multiplier: { type: number, default: 1.0 }
+        velocity_bias: { type: integer, default: 0 }
+        min_cc: { type: integer, default: 0 }
+        max_cc: { type: integer, default: 127 }
+
+psg_noise_map:
+  enabled:
+    type: boolean
+    default: true
+  default_action:
+    type: enum
+    default: envelope_cc
+    allowed: [envelope_cc, drum_map, ignore]
+  report_mode_noise:
+    type: boolean
+    default: true
+  drum_map:
+    enabled:
+      type: boolean
+      default: false
+    trigger:
+      type: enum
+      default: on_note_on
+      allowed: [on_note_on]
+    channel:
+      type: integer
+      default: 9
+      range: [0, 15]
+    envelopes:
+      type: map
+      key: envelope_number_string
+      value:
+        name: { type: string }
+        note: { type: integer, range: [0, 127] }
+        velocity_from_envelope_peak: { type: boolean, default: true }
+        velocity: { type: integer, range: [1, 127], nullable: true }
+
+opll_pseudo_drum_map:
+  enabled:
+    type: boolean
+    default: false
+  maps:
+    type: map
+    key: drum_map_name
+    value:
+      enabled: { type: boolean, default: true }
+      output:
+        midi_channel:
+          type: integer
+          default: rhythm_channel_zero_based
+          range: [0, 15]
+        mode:
+          type: enum
+          default: replace
+          allowed: [replace, add, passthrough]
+        unmatched:
+          type: enum
+          default: warn_and_drop
+          allowed: [warn_and_drop, drop, passthrough, warn_and_passthrough]
+        suppress_tone_map: { type: boolean, default: true }
+        suppress_program_change: { type: boolean, default: true }
+      hit_grouping:
+        enabled: { type: boolean, default: false }
+        suppress_continuations:
+          type: list
+          default: [macro_continuation, slur_ampersand]
+          allowed_values: [macro_continuation, slur_ampersand, pitch_slide_underscore]
+        note: >-
+          pitch_slide_underscore is reserved in v0.4 but source pitch-slide MML
+          is still reported as unsupported behavior by the converter.
+      rules:
+        type: list
+        item:
+          name: { type: string }
+          match:
+            macro_symbol: { type: string_or_list_or_wildcard }
+            track: { type: string_or_list_or_wildcard }
+            source_track: { type: string_or_list_or_wildcard }
+            envelope: { type: integer_or_list_or_range_or_wildcard }
+            source_tone: { type: integer_or_list_or_range_or_wildcard }
+            effective_tone: { type: integer_or_list_or_range_or_wildcard }
+            effective_rom_tone: { type: integer_or_list_or_range_or_wildcard }
+            note_name: { type: string_or_list_or_wildcard }
+            octave: { type: integer_or_list_or_range_or_wildcard }
+            source_midi_note: { type: integer_or_list_or_range_or_wildcard }
+          drum:
+            note: { type: integer, range: [0, 127] }
+            velocity:
+              type: integer_or_enum
+              default: source_volume
+              allowed: [source_volume, source_or_tone]
+
+voice_event:
+  allowed_types: [pc, bank, cc, pb, rpn, nrpn, marker, text, macro]
+  pc:
+    program: { type: integer_or_expr, range: [0, 127] }
+  bank:
+    msb: { type: integer_or_expr, range: [0, 127] }
+    lsb: { type: integer_or_expr, range: [0, 127] }
+  cc:
+    controller: { type: integer_or_expr, range: [0, 127] }
+    value: { type: integer_or_expr, range: [0, 127] }
+  pb:
+    value: { type: integer_or_expr, allowed_ranges: [[-8192, 8191], [0, 16383]] }
+  rpn:
+    msb: { type: integer_or_expr, range: [0, 127] }
+    lsb: { type: integer_or_expr, range: [0, 127] }
+    value: { type: integer_or_expr, range: [0, 16383] }
+  nrpn:
+    msb: { type: integer_or_expr, range: [0, 127] }
+    lsb: { type: integer_or_expr, range: [0, 127] }
+    value: { type: integer_or_expr, range: [0, 16383] }
+  marker:
+    value: { type: string }
+  text:
+    value: { type: string }
+  macro:
+    name: { type: string }
+
+tone_map:
+  defaults:
+    on_unmapped:
+      type: enum
+      default: keep_previous_and_warn
+      allowed: [keep_previous_and_warn, ignore_silently, text_meta, error]
+    emit_before_next_note:
+      type: boolean
+      default: true
+    emit_text_meta:
+      type: boolean
+      default: false
+  scc:
+    enabled: { type: boolean, default: true }
+    tones:
+      type: map
+      key: tone_number_string
+      value:
+        name: { type: string }
+        events: { type: list, item_schema_ref: voice_event }
+  opll:
+    enabled: { type: boolean, default: true }
+    respect_at_hash_rom_assign: { type: boolean, default: true }
+    tones:
+      type: map
+      key: tone_number_string
+      value:
+        name: { type: string }
+        events: { type: list, item_schema_ref: voice_event }
+
+envelope_map:
+  enabled: { type: boolean, default: true }
+  default_mode:
+    type: enum
+    default: cc11
+    allowed: [cc11, cc7, note_velocity, split_velocity, off]
+  midi_cc:
+    expression: { type: integer, default: 11 }
+    volume: { type: integer, default: 7 }
+  trigger:
+    on_apply_command:
+      type: enum
+      default: select_only
+      allowed: [select_only, select_and_emit_initial_cc]
+    on_note_on:
+      type: enum
+      default: restart_envelope
+      allowed: [restart_envelope, continue_envelope]
+  emit_initial_cc_before_note_on: { type: boolean, default: true }
+  families:
+    scc: { enabled: true }
+    opll: { enabled: true }
+  fallback_modes:
+    split_velocity:
+      enabled: { type: boolean, default: false }
+      min_segment_ticks: { type: integer, default: 30 }
+
+envelope_side_effects:
+  tone_change_inside_envelope:
+    policy:
+      type: enum
+      default: emit_at_exact_tick_with_warning
+      allowed: [ignore, emit_at_exact_tick_with_warning, split_note_at_tone_change, cc_only]
+    allow_program_change: { type: boolean, default: true }
+    allow_cc: { type: boolean, default: true }
+    allow_split_note: { type: boolean, default: false }
+  register_write_inside_envelope:
+    policy:
+      type: enum
+      default: route_to_register_map
+      allowed: [ignore_and_report, route_to_register_map]
+
+opll_register_map:
+  enabled: { type: boolean, default: true }
+  default_policy:
+    type: enum
+    default: ignore_and_report
+    allowed: [ignore_and_report, ignore_silently, text_meta, apply_rules, error]
+  report:
+    collect_usage: { type: boolean, default: true }
+    group_by:
+      type: list
+      default: [family, register, data, source_track, context]
+  rules:
+    type: list
+    item:
+      name: { type: string }
+      enabled: { type: boolean, default: false }
+      match:
+        family: { type: string, allowed: [psg, psg_noise, scc, opll, rhythm, "*"] }
+        source_track: { type: string_or_list_or_wildcard }
+        register: { type: integer_or_list_or_range_or_wildcard }
+        data: { type: integer_or_list_or_range_or_wildcard }
+        context: { type: string, allowed: [NormalMml, EnvelopeData, "*"] }
+      emit:
+        type: list
+        item_schema_ref: voice_event
+
+smf_macros:
+  max_depth: { type: integer, default: 8 }
+  additional_properties:
+    type: macro_definition
+    macro_definition:
+      events:
+        type: list
+        item_schema_ref: voice_event
+
+diagnostics:
+  output_format:
+    type: enum
+    default: json
+    allowed: [json]
+  strict_mode:
+    type: boolean
+    default: false
+  include:
+    type: list
+    default:
+      - input_file
+      - output_file
+      - config_files
+      - track_summary
+      - manual_smf_events
+      - tone_usage
+      - psg_envelope_usage
+      - scc_opll_envelope_usage
+      - register_write_usage
+      - unmapped_tones
+      - undefined_envelopes
+      - unsupported_commands
+      - warnings
+
+cli:
+  added_options:
+    config: "--config <path>"
+    emit_config_skeleton: "--emit-config-skeleton <path>"
+    manual_smf: "--manual-smf <on|off>"
+    program_numbering: "--program-numbering <zero|one>"
+    channel_numbering: "--channel-numbering <zero|one>"
+    tone_map: "--tone-map <on|off>"
+    psg_envelope_map: "--psg-envelope-map <on|off>"
+    psg_noise_drum_map: "--psg-noise-drum-map <on|off>"
+    register_map: "--register-map <off|report|on>"

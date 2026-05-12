@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::diagnostics::Diagnostics;
 use crate::ir::{
     AtContext, AtSpelling, ControlKind, ConversionOptions, ECommand, EnvelopeE, EnvelopeKind,
-    EnvelopeR, EnvelopeRef, IrEvent, LoopMarkerKind, Rational, RegisterContext, RhythmMap,
-    SmfRequest, SongIr, SourceFamily, SourceSpan, TempoEvent, TrackIr, TrackKind, apply_dots,
-    denominator_to_steps, velocity_from_source,
+    EnvelopeR, EnvelopeRef, IrEvent, LoopMarkerKind, MacroOrigin, NoteMeta, PitchGlideMeta,
+    Rational, RegisterContext, RhythmMap, SmfRequest, SongIr, SourceFamily, SourceSpan, TempoEvent,
+    TrackIr, TrackKind, apply_dots, denominator_to_steps, velocity_from_source,
 };
 use crate::smfmap::Numbering;
 
@@ -201,6 +201,7 @@ pub fn parse_source(text: &str, options: &ConversionOptions) -> Result<SongIr, S
                 let mut ctx = MmlContext {
                     macros: &macros,
                     macro_offsets: segment.macro_offsets,
+                    macro_stack: Vec::new(),
                     track_kind: segment.kind,
                     family: segment.family,
                     loop_count: effective_loop_count,
@@ -210,6 +211,7 @@ pub fn parse_source(text: &str, options: &ConversionOptions) -> Result<SongIr, S
                     line: segment.line,
                     program_numbering: options.smfmap.program_numbering,
                     channel_numbering: options.smfmap.channel_numbering,
+                    pitch_glide_enabled: options.smfmap.pitch_glide.enabled,
                 };
                 parse_mml(&segment.body, &mut state, &mut track, &mut ctx, 0)?;
             }
@@ -1348,6 +1350,7 @@ impl MmlState {
 struct MmlContext<'a> {
     macros: &'a BTreeMap<u32, String>,
     macro_offsets: MacroOffsetState,
+    macro_stack: Vec<MacroFrame>,
     track_kind: TrackKind,
     family: SourceFamily,
     loop_count: Option<u32>,
@@ -1357,6 +1360,34 @@ struct MmlContext<'a> {
     line: usize,
     program_numbering: Numbering,
     channel_numbering: Numbering,
+    pitch_glide_enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+struct MacroCall {
+    origin: MacroOrigin,
+    effective_id: u32,
+}
+
+#[derive(Clone, Debug)]
+struct MacroFrame {
+    origin: MacroOrigin,
+    note_seen: bool,
+}
+
+impl MmlContext<'_> {
+    fn note_macro_metadata(&mut self) -> (Vec<MacroOrigin>, bool) {
+        let macro_call_start = self.macro_stack.iter().any(|frame| !frame.note_seen);
+        let origins = self
+            .macro_stack
+            .iter()
+            .map(|frame| frame.origin.clone())
+            .collect();
+        for frame in &mut self.macro_stack {
+            frame.note_seen = true;
+        }
+        (origins, macro_call_start)
+    }
 }
 
 fn parse_mml(
@@ -1488,16 +1519,21 @@ fn parse_mml(
             }
             '*' => {
                 pos += 1;
-                let Some((source_id, effective_id)) = parse_macro_reference(&chars, &mut pos, ctx)?
-                else {
+                let Some(macro_call) = parse_macro_reference(&chars, &mut pos, ctx)? else {
                     continue;
                 };
-                if let Some(body) = ctx.macros.get(&effective_id) {
-                    parse_mml(body, state, track, ctx, depth + 1)?;
+                if let Some(body) = ctx.macros.get(&macro_call.effective_id).cloned() {
+                    ctx.macro_stack.push(MacroFrame {
+                        origin: macro_call.origin,
+                        note_seen: false,
+                    });
+                    let result = parse_mml(&body, state, track, ctx, depth + 1);
+                    ctx.macro_stack.pop();
+                    result?;
                 } else {
                     return Err(format!(
-                        "undefined macro {source_id} (effective *{effective_id}) at line {}",
-                        ctx.line
+                        "undefined macro {} (effective *{}) at line {}",
+                        macro_call.origin.token, macro_call.effective_id, ctx.line
                     ));
                 }
             }
@@ -1523,7 +1559,7 @@ fn parse_macro_reference(
     chars: &[char],
     pos: &mut usize,
     ctx: &mut MmlContext<'_>,
-) -> Result<Option<(String, u32)>, String> {
+) -> Result<Option<MacroCall>, String> {
     if let Some(prefix) = chars
         .get(*pos)
         .copied()
@@ -1553,7 +1589,15 @@ fn parse_macro_reference(
                 ctx.line
             ));
         };
-        return Ok(Some((format!("*{prefix}{id}"), effective_id)));
+        return Ok(Some(MacroCall {
+            origin: MacroOrigin {
+                token: format!("*{prefix}{id}"),
+                symbol: Some(prefix),
+                number: id,
+                resolved_number: effective_id,
+            },
+            effective_id,
+        }));
     }
 
     if let Some(id) = parse_u32_chars(chars, pos) {
@@ -1563,7 +1607,15 @@ fn parse_macro_reference(
                 ctx.macro_offsets.numeric, ctx.line
             ));
         };
-        return Ok(Some((format!("*{id}"), effective_id)));
+        return Ok(Some(MacroCall {
+            origin: MacroOrigin {
+                token: format!("*{id}"),
+                symbol: None,
+                number: id,
+                resolved_number: effective_id,
+            },
+            effective_id,
+        }));
     }
 
     ctx.diagnostics.add_parse_warning(
@@ -1599,7 +1651,10 @@ fn parse_note(
     }
 
     let source_octave = state.octave;
-    let mut length = parse_pitch_glide_suffix(chars, pos, state, ctx)
+    let parsed_pitch_glide = parse_pitch_glide_suffix(chars, pos, state, ctx);
+    let mut length = parsed_pitch_glide
+        .as_ref()
+        .map(|glide| glide.length)
         .or_else(|| parse_length(chars, pos, Some(state.default_length), ctx))
         .unwrap_or(state.default_length);
     while consume_tie_extension(chars, pos, &mut length, state.default_length, ctx) {}
@@ -1616,7 +1671,10 @@ fn parse_note(
         return;
     }
 
-    if state.slur_from_previous && extend_last_note_if_same(track, raw_note as u8, length) {
+    if state.slur_from_previous
+        && parsed_pitch_glide.is_none()
+        && extend_last_note_if_same(track, raw_note as u8, length)
+    {
         state.cursor = state.cursor.add(length);
         state.slur_from_previous = slur_to_next;
         return;
@@ -1642,6 +1700,8 @@ fn parse_note(
         duration
     };
 
+    let slur_from_previous = state.slur_from_previous;
+    let (macro_origin, macro_call_start) = ctx.note_macro_metadata();
     track.events.push(IrEvent::Note {
         start_steps: state.cursor,
         duration_steps: duration,
@@ -1649,9 +1709,25 @@ fn parse_note(
         velocity: velocity_from_source(state.volume),
         tone: state.tone,
         envelope: state.envelope,
+        meta: NoteMeta::from_source_note(
+            note_char,
+            source_octave,
+            raw_note as u8,
+            parsed_pitch_glide.and_then(|glide| glide.meta),
+            macro_origin,
+            macro_call_start,
+            slur_from_previous,
+            slur_to_next,
+        ),
     });
     state.cursor = state.cursor.add(length);
     state.slur_from_previous = slur_to_next;
+}
+
+#[derive(Clone, Debug)]
+struct ParsedPitchGlide {
+    length: Rational,
+    meta: Option<PitchGlideMeta>,
 }
 
 fn parse_pitch_glide_suffix(
@@ -1659,7 +1735,7 @@ fn parse_pitch_glide_suffix(
     pos: &mut usize,
     state: &mut MmlState,
     ctx: &mut MmlContext<'_>,
-) -> Option<Rational> {
+) -> Option<ParsedPitchGlide> {
     let before_ws = *pos;
     skip_ws(chars, pos);
     if chars.get(*pos) != Some(&'_') {
@@ -1688,21 +1764,55 @@ fn parse_pitch_glide_suffix(
 
     let Some(target_note) = chars.get(*pos).copied().map(|ch| ch.to_ascii_lowercase()) else {
         record_pitch_glide_unsupported(chars, command_start, *pos, ctx);
-        return Some(state.default_length);
+        return Some(ParsedPitchGlide {
+            length: state.default_length,
+            meta: None,
+        });
     };
     if !matches!(target_note, 'a'..='g') {
         record_pitch_glide_unsupported(chars, command_start, *pos, ctx);
-        return Some(state.default_length);
+        return Some(ParsedPitchGlide {
+            length: state.default_length,
+            meta: None,
+        });
     }
 
+    let mut target_semitone = note_semitone(target_note).unwrap_or(0);
     *pos += 1;
-    while matches!(chars.get(*pos), Some(&'+') | Some(&'#') | Some(&'-')) {
-        *pos += 1;
+    while let Some(ch) = chars.get(*pos) {
+        match ch {
+            '+' | '#' => {
+                target_semitone += 1;
+                *pos += 1;
+            }
+            '-' => {
+                target_semitone -= 1;
+                *pos += 1;
+            }
+            _ => break,
+        }
     }
     let length =
         parse_length(chars, pos, Some(state.default_length), ctx).unwrap_or(state.default_length);
-    record_pitch_glide_unsupported(chars, command_start, *pos, ctx);
-    Some(length)
+    let command: String = chars[command_start..*pos].iter().collect();
+    let raw_target = state.octave_base + (state.octave - 4) * 12 + target_semitone;
+    let meta = if (0..=127).contains(&raw_target) {
+        Some(PitchGlideMeta {
+            target_midi_note: raw_target as u8,
+            source: command,
+        })
+    } else {
+        ctx.diagnostics.add_parse_warning(
+            Some(ctx.line),
+            Some(ctx.track_id.to_string()),
+            format!("pitch glide target MIDI note out of range and ignored: {raw_target}"),
+        );
+        None
+    };
+    if !ctx.pitch_glide_enabled {
+        record_pitch_glide_unsupported(chars, command_start, *pos, ctx);
+    }
+    Some(ParsedPitchGlide { length, meta })
 }
 
 fn record_pitch_glide_unsupported(
@@ -1773,6 +1883,7 @@ fn parse_rhythm_note(
         velocity: velocity_from_source(volume),
         tone: state.tone,
         envelope: None,
+        meta: NoteMeta::default(),
     });
     state.cursor = state.cursor.add(length);
     state.slur_from_previous = false;
@@ -3439,6 +3550,160 @@ psg_noise_map:
     }
 
     #[test]
+    fn opll_pseudo_drum_map_replaces_macro_notes_and_suppresses_tone_map() {
+        let mut opts = ConversionOptions::default();
+        opts.smfmap
+            .merge_yaml_str(
+                r#"
+tracks:
+  "h":
+    source_family: opll
+    render_role: drum
+    drum_map: test_opll_pseudo
+
+opll_pseudo_drum_map:
+  enabled: true
+  maps:
+    test_opll_pseudo:
+      output:
+        midi_channel: 9
+        mode: replace
+        unmatched: warn_and_drop
+        suppress_tone_map: true
+      rules:
+        - name: kick
+          match: { macro_symbol: "b" }
+          drum: { note: 36, velocity: source_volume }
+
+tone_map:
+  opll:
+    tones:
+      "15":
+        events:
+          - pc: { program: 0 }
+"#,
+            )
+            .unwrap();
+
+        let mut song = parse_source(
+            "*1 = { @15 v15 c4 }\n#macro_offset { b = 0 }\nh *b01\n",
+            &opts,
+        )
+        .unwrap();
+        let events = collect_midi_events(&mut song, &opts).unwrap();
+        let allocation = song.diagnostics.channel_allocations.first().unwrap();
+        assert_eq!(allocation.source_track, "h");
+        assert_eq!(allocation.midi_channel, 9);
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.kind,
+                RenderedEventKind::NoteOn {
+                    channel: 9,
+                    note: 36,
+                    velocity: 127
+                }
+            )
+        }));
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.kind,
+                RenderedEventKind::ProgramChange { program: 0, .. }
+            )
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| { matches!(event.kind, RenderedEventKind::NoteOn { note: 60, .. }) })
+        );
+    }
+
+    #[test]
+    fn opll_pseudo_drum_hit_grouping_suppresses_macro_continuations() {
+        let mut opts = ConversionOptions::default();
+        opts.smfmap
+            .merge_yaml_str(
+                r#"
+tracks:
+  "h":
+    source_family: opll
+    render_role: drum
+    drum_map: grouped
+
+opll_pseudo_drum_map:
+  enabled: true
+  maps:
+    grouped:
+      output:
+        midi_channel: 9
+        mode: replace
+      hit_grouping:
+        enabled: true
+        suppress_continuations:
+          - macro_continuation
+      rules:
+        - match: { macro_symbol: "b" }
+          drum: { note: 36, velocity: source_volume }
+"#,
+            )
+            .unwrap();
+
+        let mut song =
+            parse_source("*1 = { c16 d16 }\n#macro_offset { b = 0 }\nh *b01\n", &opts).unwrap();
+        let events = collect_midi_events(&mut song, &opts).unwrap();
+        let kick_count = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    RenderedEventKind::NoteOn {
+                        channel: 9,
+                        note: 36,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(kick_count, 1);
+    }
+
+    #[test]
+    fn family_rhythm_shorthand_distinguishes_native_and_pseudo_opll_drums() {
+        let mut opts = ConversionOptions::default();
+        opts.smfmap
+            .merge_yaml_str(
+                r#"
+tracks:
+  "f": { family: rhythm }
+  "h": { family: rhythm }
+
+opll_pseudo_drum_map:
+  enabled: true
+"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            opts.smfmap.family_for_track("f", 1, TrackKind::Rhythm),
+            SourceFamily::Rhythm
+        );
+        assert_eq!(
+            opts.smfmap.family_for_track("h", 0, TrackKind::Melodic),
+            SourceFamily::Opll
+        );
+        assert!(
+            opts.smfmap
+                .opll_pseudo_drum_map_for_track("f", TrackKind::Rhythm)
+                .is_none()
+        );
+        assert!(
+            opts.smfmap
+                .opll_pseudo_drum_map_for_track("h", TrackKind::Melodic)
+                .is_some()
+        );
+    }
+
+    #[test]
     fn track_config_can_set_midi_port_and_channel() {
         let mut opts = ConversionOptions::default();
         opts.smfmap
@@ -3587,11 +3852,17 @@ smf:
     #[test]
     fn config_skeleton_includes_observed_usage() {
         let opts = ConversionOptions::default();
-        let song =
-            parse_source("@e1 = {1,0,f}\n1 @1 c4\n4 @2 c4\n9 @3 y14,32 c4\n", &opts).unwrap();
+        let song = parse_source(
+            "@e1 = {1,0,f}\n@e2 = {,,@4f}\n1 @1 c4\n4 @2 c4\n4 @e2 d4\n9 @3 y14,32 c4\n",
+            &opts,
+        )
+        .unwrap();
         let skeleton = crate::smfmap::emit_config_skeleton(&song);
+        assert!(skeleton.contains("version: 0.4.1"));
+        assert!(skeleton.contains("pitch_glide:\n  enabled: false"));
         assert!(skeleton.contains("name: \"PSG envelope @1\""));
         assert!(skeleton.contains("name: \"SCC @2\"\n        events: []"));
+        assert!(skeleton.contains("name: \"SCC @4\"\n        events: []"));
         assert!(skeleton.contains("name: \"OPLL @3\"\n        events: []"));
         assert!(skeleton.contains("register: 14"));
         assert!(skeleton.contains("data: 32"));
@@ -3680,6 +3951,120 @@ smf:
             })
             .collect();
         assert_eq!(starts, vec![(0, 60)]);
+    }
+
+    #[test]
+    fn pitch_glide_opt_in_renders_pitch_bend() {
+        let mut opts = ConversionOptions::default();
+        opts.smfmap
+            .merge_yaml_str(
+                r#"
+pitch_glide:
+  enabled: true
+  curve: { event_rate_hz: 4 }
+"#,
+            )
+            .unwrap();
+        let mut song = parse_source("1 t120 o4 c_<c%48\n", &opts).unwrap();
+        let events = collect_midi_events(&mut song, &opts).unwrap();
+
+        assert!(
+            !song
+                .diagnostics
+                .unsupported_commands
+                .iter()
+                .any(|item| item.command.starts_with('_'))
+        );
+        let cc_at_start: Vec<(u8, u8)> = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                RenderedEventKind::ControlChange {
+                    channel: 0,
+                    controller,
+                    value,
+                } if event.abs_tick == 0 => Some((controller, value)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            cc_at_start,
+            vec![(101, 0), (100, 0), (6, 24), (38, 0), (101, 127), (100, 127)]
+        );
+        let pitch_bends: Vec<(u64, u16)> = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                RenderedEventKind::PitchBend { channel: 0, value } => Some((event.abs_tick, value)),
+                _ => None,
+            })
+            .collect();
+        assert!(pitch_bends.contains(&(0, 8192)));
+        assert!(
+            pitch_bends
+                .iter()
+                .any(|(tick, value)| *tick < 3600 && *value == 4096)
+        );
+        assert!(pitch_bends.contains(&(3600, 8192)));
+    }
+
+    #[test]
+    fn pitch_glide_shared_channel_policy_can_error() {
+        let mut opts = ConversionOptions::default();
+        opts.smfmap
+            .merge_yaml_str(
+                r#"
+tracks:
+  "1": { midi_channel: 0 }
+  "2": { midi_channel: 0 }
+pitch_glide:
+  enabled: true
+  shared_channel_policy: error
+"#,
+            )
+            .unwrap();
+        let mut song = parse_source("12 o4 c_<c%48\n", &opts).unwrap();
+        let err = collect_midi_events(&mut song, &opts).unwrap_err();
+        assert!(err.contains("pitch_glide rejected on shared MIDI channel"));
+    }
+
+    #[test]
+    fn pitch_glide_slur_group_holds_note_on() {
+        let mut opts = ConversionOptions::default();
+        opts.smfmap
+            .merge_yaml_str(
+                r#"
+pitch_glide:
+  enabled: true
+  curve: { event_rate_hz: 4 }
+"#,
+            )
+            .unwrap();
+        let mut song = parse_source("1 t120 o4 c_d%48&d_e%48\n", &opts).unwrap();
+        let events = collect_midi_events(&mut song, &opts).unwrap();
+        let note_ons: Vec<(u64, u8)> = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                RenderedEventKind::NoteOn { note, .. } => Some((event.abs_tick, note)),
+                _ => None,
+            })
+            .collect();
+        let note_offs: Vec<(u64, u8)> = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                RenderedEventKind::NoteOff { note, .. } => Some((event.abs_tick, note)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(note_ons, vec![(0, 60)]);
+        assert_eq!(note_offs, vec![(7200, 60)]);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.kind,
+                RenderedEventKind::PitchBend {
+                    channel: 0,
+                    value: 9557
+                }
+            )
+        }));
     }
 
     #[test]

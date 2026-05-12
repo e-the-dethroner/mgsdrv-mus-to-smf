@@ -1,0 +1,22 @@
+version: 0.4.1
+extends: mgsdrv_smfmap_default_config_v0_4.yaml
+
+pitch_glide:
+  enabled: false
+  output: pitch_bend
+  pitch_bend_range_semitones: 24
+  pitch_bend_range_cents: 0
+  emit_rpn_pitch_bend_range: true
+  emit_rpn_null_after_setting: true
+  curve:
+    shape: linear
+    event_rate_hz: 60
+    min_delta_cents: 4
+    include_start_point: true
+    include_end_point: true
+  reset:
+    at_note_end: true
+    before_next_note_on: true
+    at_track_end: true
+  shared_channel_policy: warn_and_suppress
+  range_policy: clamp

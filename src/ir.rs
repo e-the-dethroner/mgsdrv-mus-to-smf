@@ -281,6 +281,7 @@ pub enum IrEvent {
         velocity: u8,
         tone: Option<u8>,
         envelope: Option<EnvelopeRef>,
+        meta: NoteMeta,
     },
     Rest {
         start_steps: Rational,
@@ -342,6 +343,56 @@ pub enum IrEvent {
         request: SmfRequest,
         source_span: SourceSpan,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct NoteMeta {
+    pub note_name: Option<char>,
+    pub source_octave: Option<i32>,
+    pub source_midi_note: Option<u8>,
+    pub pitch_glide: Option<PitchGlideMeta>,
+    pub macro_origin: Vec<MacroOrigin>,
+    pub macro_call_start: bool,
+    pub slur_from_previous: bool,
+    pub slur_to_next: bool,
+}
+
+impl NoteMeta {
+    pub fn from_source_note(
+        note_name: char,
+        source_octave: i32,
+        source_midi_note: u8,
+        pitch_glide: Option<PitchGlideMeta>,
+        macro_origin: Vec<MacroOrigin>,
+        macro_call_start: bool,
+        slur_from_previous: bool,
+        slur_to_next: bool,
+    ) -> Self {
+        Self {
+            note_name: Some(note_name),
+            source_octave: Some(source_octave),
+            source_midi_note: Some(source_midi_note),
+            pitch_glide,
+            macro_origin,
+            macro_call_start,
+            slur_from_previous,
+            slur_to_next,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PitchGlideMeta {
+    pub target_midi_note: u8,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MacroOrigin {
+    pub token: String,
+    pub symbol: Option<char>,
+    pub number: u32,
+    pub resolved_number: u32,
 }
 
 #[allow(dead_code)]
