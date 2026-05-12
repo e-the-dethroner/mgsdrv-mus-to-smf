@@ -4,6 +4,7 @@ use crate::ir::{Rational, TempoEvent};
 pub struct Diagnostics {
     pub input_file: Option<String>,
     pub output_file: Option<String>,
+    pub config_files: Vec<String>,
     pub ppq: u16,
     pub encoding: Option<String>,
     pub track_summaries: Vec<TrackSummary>,
@@ -13,6 +14,11 @@ pub struct Diagnostics {
     pub channel_allocations: Vec<ChannelAllocation>,
     pub loop_markers: Vec<LoopMarkerDiagnostic>,
     pub envelope_event_counts: Vec<EnvelopeEventCount>,
+    pub manual_smf_events: Vec<ManualSmfDiagnostic>,
+    pub tone_usage: Vec<ToneUsage>,
+    pub psg_envelope_usage: Vec<PsgEnvelopeUsage>,
+    pub register_write_usage: Vec<RegisterWriteUsage>,
+    pub unmapped_tones: Vec<ToneUsage>,
 }
 
 impl Diagnostics {
@@ -72,6 +78,60 @@ impl Diagnostics {
         });
     }
 
+    pub fn add_manual_smf_event(
+        &mut self,
+        line: Option<usize>,
+        track: Option<String>,
+        command: impl Into<String>,
+    ) {
+        self.manual_smf_events.push(ManualSmfDiagnostic {
+            line,
+            track,
+            command: command.into(),
+        });
+    }
+
+    pub fn add_tone_usage(&mut self, track: String, family: String, tone: u8) {
+        self.tone_usage.push(ToneUsage {
+            track,
+            family,
+            tone,
+        });
+    }
+
+    pub fn add_unmapped_tone(&mut self, track: String, family: String, tone: u8) {
+        self.unmapped_tones.push(ToneUsage {
+            track,
+            family,
+            tone,
+        });
+    }
+
+    pub fn add_psg_envelope_usage(&mut self, track: String, envelope: u8, spelling: String) {
+        self.psg_envelope_usage.push(PsgEnvelopeUsage {
+            track,
+            envelope,
+            spelling,
+        });
+    }
+
+    pub fn add_register_write_usage(
+        &mut self,
+        track: String,
+        family: String,
+        register: u8,
+        data: u8,
+        context: String,
+    ) {
+        self.register_write_usage.push(RegisterWriteUsage {
+            track,
+            family,
+            register,
+            data,
+            context,
+        });
+    }
+
     pub fn has_warnings(&self) -> bool {
         !self.parse_warnings.is_empty() || !self.unsupported_commands.is_empty()
     }
@@ -83,6 +143,18 @@ impl Diagnostics {
         push_field_string_opt(&mut out, "output", self.output_file.as_deref(), true);
         push_field_number(&mut out, "ppq", self.ppq as u64, true);
         push_field_string_opt(&mut out, "encoding", self.encoding.as_deref(), true);
+
+        out.push_str("  \"config_files\": [\n");
+        for (i, path) in self.config_files.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            push_indent(&mut out, 4);
+            out.push('"');
+            push_escaped(&mut out, path);
+            out.push('"');
+        }
+        out.push_str("\n  ],\n");
 
         out.push_str("  \"tracks\": [\n");
         for (i, track) in self.track_summaries.iter().enumerate() {
@@ -199,6 +271,73 @@ impl Diagnostics {
         }
         out.push_str("\n  ],\n");
 
+        out.push_str("  \"manual_smf_events\": [\n");
+        for (i, item) in self.manual_smf_events.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str("    {\n");
+            push_object_number_opt(&mut out, "line", item.line, true, 6);
+            push_object_string_opt(&mut out, "track", item.track.as_deref(), true, 6);
+            push_object_string(&mut out, "command", &item.command, false, 6);
+            out.push_str("\n    }");
+        }
+        out.push_str("\n  ],\n");
+
+        out.push_str("  \"tone_usage\": [\n");
+        for (i, item) in self.tone_usage.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str("    {\n");
+            push_object_string(&mut out, "track", &item.track, true, 6);
+            push_object_string(&mut out, "family", &item.family, true, 6);
+            push_object_number(&mut out, "tone", item.tone as u64, false, 6);
+            out.push_str("\n    }");
+        }
+        out.push_str("\n  ],\n");
+
+        out.push_str("  \"psg_envelope_usage\": [\n");
+        for (i, item) in self.psg_envelope_usage.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str("    {\n");
+            push_object_string(&mut out, "track", &item.track, true, 6);
+            push_object_number(&mut out, "envelope", item.envelope as u64, true, 6);
+            push_object_string(&mut out, "spelling", &item.spelling, false, 6);
+            out.push_str("\n    }");
+        }
+        out.push_str("\n  ],\n");
+
+        out.push_str("  \"register_write_usage\": [\n");
+        for (i, item) in self.register_write_usage.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str("    {\n");
+            push_object_string(&mut out, "track", &item.track, true, 6);
+            push_object_string(&mut out, "family", &item.family, true, 6);
+            push_object_number(&mut out, "register", item.register as u64, true, 6);
+            push_object_number(&mut out, "data", item.data as u64, true, 6);
+            push_object_string(&mut out, "context", &item.context, false, 6);
+            out.push_str("\n    }");
+        }
+        out.push_str("\n  ],\n");
+
+        out.push_str("  \"unmapped_tones\": [\n");
+        for (i, item) in self.unmapped_tones.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str("    {\n");
+            push_object_string(&mut out, "track", &item.track, true, 6);
+            push_object_string(&mut out, "family", &item.family, true, 6);
+            push_object_number(&mut out, "tone", item.tone as u64, false, 6);
+            out.push_str("\n    }");
+        }
+        out.push_str("\n  ],\n");
+
         out.push_str("  \"envelope_event_counts\": [\n");
         for (i, item) in self.envelope_event_counts.iter().enumerate() {
             if i > 0 {
@@ -271,6 +410,36 @@ pub struct EnvelopeEventCount {
     pub track: String,
     pub envelope: String,
     pub event_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct ManualSmfDiagnostic {
+    pub line: Option<usize>,
+    pub track: Option<String>,
+    pub command: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToneUsage {
+    pub track: String,
+    pub family: String,
+    pub tone: u8,
+}
+
+#[derive(Clone, Debug)]
+pub struct PsgEnvelopeUsage {
+    pub track: String,
+    pub envelope: u8,
+    pub spelling: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RegisterWriteUsage {
+    pub track: String,
+    pub family: String,
+    pub register: u8,
+    pub data: u8,
+    pub context: String,
 }
 
 fn push_field_string_opt(out: &mut String, key: &str, value: Option<&str>, comma: bool) {

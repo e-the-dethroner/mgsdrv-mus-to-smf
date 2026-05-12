@@ -49,39 +49,10 @@ pub fn decode_bytes(bytes: &[u8], encoding: EncodingChoice) -> Result<LoadedSour
 
     let normalized = decoded.replace("\r\n", "\n").replace('\r', "\n");
     Ok(LoadedSource {
-        text: strip_comments(&normalized),
+        text: normalized,
         encoding_used,
         warnings,
     })
-}
-
-pub fn strip_comments(input: &str) -> String {
-    let mut out = String::new();
-    for line in input.lines() {
-        let mut in_quote = false;
-        let mut escaped = false;
-        for ch in line.chars() {
-            if escaped {
-                out.push(ch);
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' if in_quote => {
-                    out.push(ch);
-                    escaped = true;
-                }
-                '"' => {
-                    in_quote = !in_quote;
-                    out.push(ch);
-                }
-                ';' if !in_quote => break,
-                _ => out.push(ch),
-            }
-        }
-        out.push('\n');
-    }
-    out
 }
 
 fn decode_shift_jis(bytes: &[u8]) -> (String, bool) {
@@ -112,12 +83,12 @@ mod tests {
     }
 
     #[test]
-    fn comments_are_not_stripped_inside_quotes() {
+    fn comments_are_preserved_for_directive_parsing() {
         let loaded = decode_bytes(
-            b"#title \"a;b\" ; comment\n1 c ; comment\n",
+            b"#title \"a;b\" ; comment\n1 c ;@smf pc 80\n",
             EncodingChoice::Utf8,
         )
         .unwrap();
-        assert_eq!(loaded.text, "#title \"a;b\" \n1 c \n");
+        assert_eq!(loaded.text, "#title \"a;b\" ; comment\n1 c ;@smf pc 80\n");
     }
 }

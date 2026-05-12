@@ -1,12 +1,25 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::diagnostics::{ChannelAllocation, EnvelopeEventCount, TrackSummary};
+use crate::diagnostics::{ChannelAllocation, Diagnostics, EnvelopeEventCount, TrackSummary};
 use crate::ir::{
-    ChannelOverflowPolicy, ControlKind, ConversionOptions, ECommand, EnvelopeDefinition,
-    EnvelopeMode, EnvelopeRef, IrEvent, LoopMarkerKind, Rational, SongIr, TempoEvent, TonePolicy,
+    AtSpelling, ChannelOverflowPolicy, ControlKind, ConversionOptions, ECommand,
+    EnvelopeDefinition, EnvelopeMode, EnvelopeRef, IrEvent, LoopMarkerKind, Rational,
+    RegisterContext, SmfRequest, SongIr, SourceFamily, SourceSpan, TempoEvent, TonePolicy,
     TrackKind,
 };
+use crate::smfmap::{PsgNoiseDefaultAction, RegisterMapPolicy};
+
+const PRI_NOTE_OFF: u8 = 10;
+const PRI_BANK: u8 = 20;
+const PRI_PROGRAM: u8 = 30;
+const PRI_RPN_NRPN: u8 = 40;
+const PRI_CC: u8 = 50;
+const PRI_PITCH_BEND: u8 = 60;
+const PRI_INITIAL_EXPRESSION: u8 = 70;
+const PRI_META: u8 = 80;
+const PRI_NOTE_ON: u8 = 90;
+const PRI_ENVELOPE_CURVE: u8 = 100;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderedEvent {
@@ -37,6 +50,10 @@ pub enum RenderedEventKind {
         channel: u8,
         program: u8,
     },
+    PitchBend {
+        channel: u8,
+        value: u16,
+    },
     Tempo {
         bpm: u32,
     },
@@ -64,7 +81,12 @@ pub enum RenderedEventKind {
 
 pub fn render_smf(song: &mut SongIr, options: &ConversionOptions) -> Result<Vec<u8>, String> {
     let events = collect_midi_events(song, options)?;
-    encode_smf(&events, song.tracks.len() + 1, song.ppq)
+    encode_smf(
+        &events,
+        song.tracks.len() + 1,
+        song.ppq,
+        options.smfmap.smf_type,
+    )
 }
 
 pub fn collect_midi_events(
@@ -74,6 +96,11 @@ pub fn collect_midi_events(
     song.diagnostics.track_summaries.clear();
     song.diagnostics.channel_allocations.clear();
     song.diagnostics.envelope_event_counts.clear();
+    song.diagnostics.manual_smf_events.clear();
+    song.diagnostics.tone_usage.clear();
+    song.diagnostics.psg_envelope_usage.clear();
+    song.diagnostics.register_write_usage.clear();
+    song.diagnostics.unmapped_tones.clear();
 
     let assignments = allocate_channels(song, options)?;
     let shared_channel_counts = channel_counts(&assignments);
@@ -161,6 +188,32 @@ pub fn collect_midi_events(
         ));
     }
 
+    if options.smfmap.manual_smf_enabled {
+        for event in song.conductor_events.clone() {
+            if let IrEvent::ManualSmf {
+                target_channel,
+                source_step,
+                request,
+                source_span,
+                ..
+            } = event
+            {
+                emit_smf_request(
+                    &mut events,
+                    0,
+                    source_step.to_midi_ticks(song.ppq),
+                    target_channel,
+                    None,
+                    &request,
+                    options,
+                    &mut song.diagnostics,
+                    &source_span,
+                    0,
+                )?;
+            }
+        }
+    }
+
     for track in &song.tracks {
         for event in &track.events {
             if let IrEvent::LoopMarker { at_steps, kind } = event {
@@ -219,6 +272,9 @@ pub fn collect_midi_events(
         let mut cc_count = 0usize;
         let mut env_counts: HashMap<String, usize> = HashMap::new();
         let mut warned_shared_envelope_suppression = false;
+        let track_family = options
+            .smfmap
+            .family_for_track(&track.source_id, 0, track.kind);
 
         for ir_event in &track.events {
             match ir_event {
@@ -236,7 +292,65 @@ pub fn collect_midi_events(
                     let mut note_velocity = *velocity;
 
                     if let Some(reference) = envelope {
-                        match options.envelope_mode {
+                        emit_envelope_side_effects(
+                            &mut events,
+                            midi_track,
+                            start_tick,
+                            Some(channel),
+                            &track.source_id,
+                            track_family,
+                            *reference,
+                            options,
+                            song,
+                        )?;
+                    }
+
+                    if track_family == SourceFamily::PsgNoise {
+                        if let Some(drum) = options.smfmap.psg_noise_drum_for_envelope(*envelope) {
+                            let mut drum_velocity = drum.velocity.unwrap_or(note_velocity);
+                            if drum.velocity.is_none() && drum.velocity_from_envelope_peak {
+                                if let Some(reference) = envelope {
+                                    if let Some(value) = first_envelope_value(
+                                        song,
+                                        *reference,
+                                        start_tick,
+                                        duration_ticks,
+                                        &tempo_points,
+                                    ) {
+                                        drum_velocity = scale_velocity(note_velocity, value);
+                                    }
+                                }
+                            }
+                            events.push(RenderedEvent::channel(
+                                midi_track,
+                                start_tick,
+                                PRI_NOTE_ON,
+                                RenderedEventKind::NoteOn {
+                                    channel: options.smfmap.psg_noise_drum_channel,
+                                    note: drum.note,
+                                    velocity: drum_velocity,
+                                },
+                            ));
+                            events.push(RenderedEvent::channel(
+                                midi_track,
+                                end_tick,
+                                PRI_NOTE_OFF,
+                                RenderedEventKind::NoteOff {
+                                    channel: options.smfmap.psg_noise_drum_channel,
+                                    note: drum.note,
+                                    velocity: 0,
+                                },
+                            ));
+                            note_count += 1;
+                            continue;
+                        }
+                    }
+
+                    if let Some(reference) = envelope {
+                        let envelope_mode = options
+                            .smfmap
+                            .envelope_mode_for_family(track_family, options.envelope_mode);
+                        match envelope_mode {
                             EnvelopeMode::Cc11 | EnvelopeMode::Cc7 => {
                                 if channel_is_shared {
                                     if !warned_shared_envelope_suppression {
@@ -251,7 +365,7 @@ pub fn collect_midi_events(
                                     events.push(RenderedEvent::channel(
                                         midi_track,
                                         start_tick,
-                                        30,
+                                        PRI_NOTE_ON,
                                         RenderedEventKind::NoteOn {
                                             channel,
                                             note: *note,
@@ -261,7 +375,7 @@ pub fn collect_midi_events(
                                     events.push(RenderedEvent::channel(
                                         midi_track,
                                         end_tick,
-                                        20,
+                                        PRI_NOTE_OFF,
                                         RenderedEventKind::NoteOff {
                                             channel,
                                             note: *note,
@@ -271,11 +385,9 @@ pub fn collect_midi_events(
                                     note_count += 1;
                                     continue;
                                 }
-                                let controller = match options.envelope_mode {
-                                    EnvelopeMode::Cc11 => 11,
-                                    EnvelopeMode::Cc7 => 7,
-                                    _ => unreachable!(),
-                                };
+                                let controller = options
+                                    .smfmap
+                                    .envelope_controller_for_family(track_family, envelope_mode);
                                 let cc_events = render_envelope_cc(
                                     song,
                                     *reference,
@@ -292,7 +404,11 @@ pub fn collect_midi_events(
                                     events.push(RenderedEvent::channel(
                                         midi_track,
                                         start_tick + offset,
-                                        10,
+                                        if offset == 0 {
+                                            PRI_INITIAL_EXPRESSION
+                                        } else {
+                                            PRI_ENVELOPE_CURVE
+                                        },
                                         RenderedEventKind::ControlChange {
                                             channel,
                                             controller,
@@ -329,7 +445,7 @@ pub fn collect_midi_events(
                                         events.push(RenderedEvent::channel(
                                             midi_track,
                                             start_tick + offset_start,
-                                            30,
+                                            PRI_NOTE_ON,
                                             RenderedEventKind::NoteOn {
                                                 channel,
                                                 note: *note,
@@ -339,7 +455,7 @@ pub fn collect_midi_events(
                                         events.push(RenderedEvent::channel(
                                             midi_track,
                                             start_tick + offset_end,
-                                            20,
+                                            PRI_NOTE_OFF,
                                             RenderedEventKind::NoteOff {
                                                 channel,
                                                 note: *note,
@@ -358,7 +474,7 @@ pub fn collect_midi_events(
                     events.push(RenderedEvent::channel(
                         midi_track,
                         start_tick,
-                        30,
+                        PRI_NOTE_ON,
                         RenderedEventKind::NoteOn {
                             channel,
                             note: *note,
@@ -368,7 +484,7 @@ pub fn collect_midi_events(
                     events.push(RenderedEvent::channel(
                         midi_track,
                         end_tick,
-                        20,
+                        PRI_NOTE_OFF,
                         RenderedEventKind::NoteOff {
                             channel,
                             note: *note,
@@ -384,7 +500,7 @@ pub fn collect_midi_events(
                             events.push(RenderedEvent::channel(
                                 midi_track,
                                 at_steps.to_midi_ticks(song.ppq),
-                                15,
+                                PRI_PROGRAM,
                                 RenderedEventKind::ProgramChange {
                                     channel,
                                     program: gm_program(*tone),
@@ -395,7 +511,7 @@ pub fn collect_midi_events(
                             events.push(RenderedEvent::meta(
                                 midi_track,
                                 at_steps.to_midi_ticks(song.ppq),
-                                15,
+                                PRI_META,
                                 RenderedEventKind::Text(format!("MGS tone @{tone}")),
                             ));
                         }
@@ -407,7 +523,7 @@ pub fn collect_midi_events(
                             events.push(RenderedEvent::meta(
                                 midi_track,
                                 tick,
-                                15,
+                                PRI_META,
                                 RenderedEventKind::Text(text.clone()),
                             ));
                         } else {
@@ -419,7 +535,137 @@ pub fn collect_midi_events(
                         }
                     }
                 },
-                IrEvent::Rest { .. } | IrEvent::Tempo { .. } | IrEvent::LoopMarker { .. } => {}
+                IrEvent::AtCommand {
+                    source_step,
+                    family,
+                    number,
+                    spelling,
+                    source_span,
+                    ..
+                } => match family {
+                    SourceFamily::Psg | SourceFamily::PsgNoise => {
+                        song.diagnostics.add_psg_envelope_usage(
+                            track.source_id.clone(),
+                            *number,
+                            spelling.as_str().to_string(),
+                        );
+                    }
+                    SourceFamily::Scc | SourceFamily::Opll if *spelling == AtSpelling::At => {
+                        song.diagnostics.add_tone_usage(
+                            track.source_id.clone(),
+                            family.as_str().to_string(),
+                            *number,
+                        );
+                        let lookup_number = if *family == SourceFamily::Opll
+                            && options.smfmap.opll_respect_at_hash_rom_assign
+                        {
+                            song.opll_tone_assignments
+                                .get(number)
+                                .copied()
+                                .unwrap_or(*number)
+                        } else {
+                            *number
+                        };
+                        let mapped = options
+                            .smfmap
+                            .tone_events(*family, lookup_number)
+                            .map(|events| events.to_vec());
+                        if let Some(mapped) = mapped {
+                            if mapped.is_empty() {
+                                song.diagnostics.add_unmapped_tone(
+                                    track.source_id.clone(),
+                                    family.as_str().to_string(),
+                                    *number,
+                                );
+                            }
+                            for request in mapped {
+                                emit_smf_request(
+                                    &mut events,
+                                    midi_track,
+                                    source_step.to_midi_ticks(song.ppq),
+                                    Some(channel),
+                                    Some(track.source_id.clone()),
+                                    &request,
+                                    options,
+                                    &mut song.diagnostics,
+                                    source_span,
+                                    0,
+                                )?;
+                            }
+                        } else if options.smfmap.tone_map_enabled {
+                            song.diagnostics.add_unmapped_tone(
+                                track.source_id.clone(),
+                                family.as_str().to_string(),
+                                *number,
+                            );
+                            song.diagnostics.add_unsupported(
+                                source_span.line,
+                                Some(track.source_id.clone()),
+                                format!("{}{}", spelling.as_str(), number),
+                                "tone_map: unmapped tone",
+                            );
+                        }
+                    }
+                    SourceFamily::Scc | SourceFamily::Opll => {}
+                    SourceFamily::Rhythm => song.diagnostics.add_unsupported(
+                        source_span.line,
+                        Some(track.source_id.clone()),
+                        format!("{}{}", spelling.as_str(), number),
+                        "ignore_and_report: rhythm @ command ignored",
+                    ),
+                },
+                IrEvent::ManualSmf {
+                    target_channel,
+                    source_step,
+                    request,
+                    source_span,
+                    ..
+                } => {
+                    if options.smfmap.manual_smf_enabled {
+                        emit_smf_request(
+                            &mut events,
+                            midi_track,
+                            source_step.to_midi_ticks(song.ppq),
+                            target_channel.or(Some(channel)),
+                            Some(track.source_id.clone()),
+                            request,
+                            options,
+                            &mut song.diagnostics,
+                            source_span,
+                            0,
+                        )?;
+                    }
+                }
+                IrEvent::RegisterWrite {
+                    source_step,
+                    family,
+                    register,
+                    data,
+                    context,
+                    source_span,
+                    ..
+                } => {
+                    handle_register_write(
+                        &mut events,
+                        midi_track,
+                        source_step.to_midi_ticks(song.ppq),
+                        Some(channel),
+                        &track.source_id,
+                        *family,
+                        *register,
+                        *data,
+                        *context,
+                        options,
+                        &mut song.diagnostics,
+                        source_span,
+                    )?;
+                }
+                IrEvent::PsgEnvelopeSelect { .. }
+                | IrEvent::ToneChange { .. }
+                | IrEvent::EnvelopeApply { .. }
+                | IrEvent::Rest { .. }
+                | IrEvent::Tempo { .. }
+                | IrEvent::LoopMarker { .. } => {}
             }
         }
 
@@ -447,6 +693,454 @@ pub fn collect_midi_events(
     add_end_of_track_events(&mut events, song.tracks.len() + 1);
     events.sort_by_key(|event| (event.track_index, event.abs_tick, event.priority));
     Ok(events)
+}
+
+fn emit_smf_request(
+    events: &mut Vec<RenderedEvent>,
+    midi_track: usize,
+    tick: u64,
+    channel: Option<u8>,
+    source_track: Option<String>,
+    request: &SmfRequest,
+    options: &ConversionOptions,
+    diagnostics: &mut Diagnostics,
+    source_span: &SourceSpan,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > options.smfmap.macro_max_depth {
+        return Err("SMF macro expansion exceeded max_depth".to_string());
+    }
+    diagnostics.add_manual_smf_event(
+        source_span.line,
+        source_track.clone(),
+        smf_request_name(request),
+    );
+
+    match request {
+        SmfRequest::Pc { program } => {
+            let Some(channel) = channel else {
+                diagnostics.add_parse_warning(source_span.line, None, "pc requires track target");
+                return Ok(());
+            };
+            events.push(RenderedEvent::channel(
+                midi_track,
+                tick,
+                PRI_PROGRAM,
+                RenderedEventKind::ProgramChange {
+                    channel,
+                    program: *program,
+                },
+            ));
+        }
+        SmfRequest::Bank { msb, lsb } => {
+            let Some(channel) = channel else {
+                diagnostics.add_parse_warning(source_span.line, None, "bank requires track target");
+                return Ok(());
+            };
+            events.push(RenderedEvent::channel(
+                midi_track,
+                tick,
+                PRI_BANK,
+                RenderedEventKind::ControlChange {
+                    channel,
+                    controller: 0,
+                    value: *msb,
+                },
+            ));
+            events.push(RenderedEvent::channel(
+                midi_track,
+                tick,
+                PRI_BANK,
+                RenderedEventKind::ControlChange {
+                    channel,
+                    controller: 32,
+                    value: *lsb,
+                },
+            ));
+        }
+        SmfRequest::Cc { controller, value } => {
+            let Some(channel) = channel else {
+                diagnostics.add_parse_warning(source_span.line, None, "cc requires track target");
+                return Ok(());
+            };
+            events.push(RenderedEvent::channel(
+                midi_track,
+                tick,
+                PRI_CC,
+                RenderedEventKind::ControlChange {
+                    channel,
+                    controller: *controller,
+                    value: *value,
+                },
+            ));
+        }
+        SmfRequest::PitchBend { value } => {
+            let Some(channel) = channel else {
+                diagnostics.add_parse_warning(source_span.line, None, "pb requires track target");
+                return Ok(());
+            };
+            events.push(RenderedEvent::channel(
+                midi_track,
+                tick,
+                PRI_PITCH_BEND,
+                RenderedEventKind::PitchBend {
+                    channel,
+                    value: normalize_pitch_bend(*value),
+                },
+            ));
+        }
+        SmfRequest::Rpn { msb, lsb, value } => {
+            emit_parameter_sequence(events, midi_track, tick, channel, true, *msb, *lsb, *value);
+        }
+        SmfRequest::Nrpn { msb, lsb, value } => {
+            emit_parameter_sequence(events, midi_track, tick, channel, false, *msb, *lsb, *value);
+        }
+        SmfRequest::Marker { text } => {
+            events.push(RenderedEvent::meta(
+                midi_track,
+                tick,
+                PRI_META,
+                RenderedEventKind::Marker {
+                    source_track,
+                    text: text.clone(),
+                },
+            ));
+        }
+        SmfRequest::Text { text } => {
+            events.push(RenderedEvent::meta(
+                midi_track,
+                tick,
+                PRI_META,
+                RenderedEventKind::Text(text.clone()),
+            ));
+        }
+        SmfRequest::Macro { name } => {
+            if let Some(macro_events) = options.smfmap.macros.get(name) {
+                for request in macro_events {
+                    emit_smf_request(
+                        events,
+                        midi_track,
+                        tick,
+                        channel,
+                        source_track.clone(),
+                        request,
+                        options,
+                        diagnostics,
+                        source_span,
+                        depth + 1,
+                    )?;
+                }
+            } else {
+                diagnostics.add_parse_warning(
+                    source_span.line,
+                    source_track,
+                    format!("undefined SMF macro: {name}"),
+                );
+            }
+        }
+        SmfRequest::Reset { name } => {
+            let macro_name = name.as_deref().unwrap_or("reset_channel");
+            if let Some(macro_events) = options.smfmap.macros.get(macro_name) {
+                for request in macro_events {
+                    emit_smf_request(
+                        events,
+                        midi_track,
+                        tick,
+                        channel,
+                        source_track.clone(),
+                        request,
+                        options,
+                        diagnostics,
+                        source_span,
+                        depth + 1,
+                    )?;
+                }
+            } else {
+                let defaults = [
+                    SmfRequest::Cc {
+                        controller: 121,
+                        value: 0,
+                    },
+                    SmfRequest::Cc {
+                        controller: 7,
+                        value: 100,
+                    },
+                    SmfRequest::Cc {
+                        controller: 10,
+                        value: 64,
+                    },
+                    SmfRequest::Cc {
+                        controller: 11,
+                        value: 127,
+                    },
+                ];
+                for request in defaults {
+                    emit_smf_request(
+                        events,
+                        midi_track,
+                        tick,
+                        channel,
+                        source_track.clone(),
+                        &request,
+                        options,
+                        diagnostics,
+                        source_span,
+                        depth + 1,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit_parameter_sequence(
+    events: &mut Vec<RenderedEvent>,
+    midi_track: usize,
+    tick: u64,
+    channel: Option<u8>,
+    is_rpn: bool,
+    msb: u8,
+    lsb: u8,
+    value: u16,
+) {
+    let Some(channel) = channel else {
+        return;
+    };
+    let (msb_controller, lsb_controller) = if is_rpn { (101, 100) } else { (99, 98) };
+    for (controller, value) in [
+        (msb_controller, msb),
+        (lsb_controller, lsb),
+        (6, ((value >> 7) & 0x7f) as u8),
+        (38, (value & 0x7f) as u8),
+    ] {
+        events.push(RenderedEvent::channel(
+            midi_track,
+            tick,
+            PRI_RPN_NRPN,
+            RenderedEventKind::ControlChange {
+                channel,
+                controller,
+                value,
+            },
+        ));
+    }
+}
+
+fn handle_register_write(
+    events: &mut Vec<RenderedEvent>,
+    midi_track: usize,
+    tick: u64,
+    channel: Option<u8>,
+    track_id: &str,
+    family: SourceFamily,
+    register: u8,
+    data: u8,
+    context: RegisterContext,
+    options: &ConversionOptions,
+    diagnostics: &mut Diagnostics,
+    source_span: &SourceSpan,
+) -> Result<(), String> {
+    diagnostics.add_register_write_usage(
+        track_id.to_string(),
+        family.as_str().to_string(),
+        register,
+        data,
+        context.as_str().to_string(),
+    );
+    match options.smfmap.register_map_policy {
+        RegisterMapPolicy::IgnoreSilently => {}
+        RegisterMapPolicy::IgnoreAndReport => diagnostics.add_unsupported(
+            source_span.line,
+            Some(track_id.to_string()),
+            format!("y{register},{data}"),
+            "ignore_and_report: register write ignored",
+        ),
+        RegisterMapPolicy::TextMeta => {
+            events.push(RenderedEvent::meta(
+                midi_track,
+                tick,
+                PRI_META,
+                RenderedEventKind::Text(format!(
+                    "MGS register write {} y{},{} ignored",
+                    family.as_str(),
+                    register,
+                    data
+                )),
+            ));
+        }
+        RegisterMapPolicy::ApplyRules => {
+            let matches = options
+                .smfmap
+                .register_rule_events(family, track_id, register, data, context);
+            if matches.is_empty() {
+                diagnostics.add_unsupported(
+                    source_span.line,
+                    Some(track_id.to_string()),
+                    format!("y{register},{data}"),
+                    "apply_rules: no matching register rule",
+                );
+            }
+            for (_rule_name, requests) in matches {
+                for request in requests {
+                    emit_smf_request(
+                        events,
+                        midi_track,
+                        tick,
+                        channel,
+                        Some(track_id.to_string()),
+                        &request,
+                        options,
+                        diagnostics,
+                        source_span,
+                        0,
+                    )?;
+                }
+            }
+        }
+        RegisterMapPolicy::Error => {
+            return Err(format!(
+                "register write y{register},{data} rejected by register map policy"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn emit_envelope_side_effects(
+    events: &mut Vec<RenderedEvent>,
+    midi_track: usize,
+    tick: u64,
+    channel: Option<u8>,
+    track_id: &str,
+    family: SourceFamily,
+    reference: EnvelopeRef,
+    options: &ConversionOptions,
+    song: &mut SongIr,
+) -> Result<(), String> {
+    if !matches!(family, SourceFamily::Scc | SourceFamily::Opll) {
+        return Ok(());
+    }
+    let Some(EnvelopeDefinition::E(env)) = song.envelopes.get(reference) else {
+        return Ok(());
+    };
+    let commands = env.commands.clone();
+    let source_span = SourceSpan {
+        line: None,
+        track: Some(track_id.to_string()),
+    };
+
+    for command in commands {
+        match command {
+            ECommand::ToneChange(tone) => {
+                song.diagnostics.add_unsupported(
+                    None,
+                    Some(track_id.to_string()),
+                    format!("{}:@{tone}", envelope_name(reference)),
+                    "emitted via tone_map at note start; MIDI behavior depends on the target synth",
+                );
+                let lookup_number = if family == SourceFamily::Opll
+                    && options.smfmap.opll_respect_at_hash_rom_assign
+                {
+                    song.opll_tone_assignments
+                        .get(&tone)
+                        .copied()
+                        .unwrap_or(tone)
+                } else {
+                    tone
+                };
+                let mapped = options
+                    .smfmap
+                    .tone_events(family, lookup_number)
+                    .map(|events| events.to_vec());
+                if let Some(mapped) = mapped {
+                    if mapped.is_empty() {
+                        song.diagnostics.add_unmapped_tone(
+                            track_id.to_string(),
+                            family.as_str().to_string(),
+                            tone,
+                        );
+                    }
+                    for request in mapped {
+                        emit_smf_request(
+                            events,
+                            midi_track,
+                            tick,
+                            channel,
+                            Some(track_id.to_string()),
+                            &request,
+                            options,
+                            &mut song.diagnostics,
+                            &source_span,
+                            0,
+                        )?;
+                    }
+                } else if options.smfmap.tone_map_enabled {
+                    song.diagnostics.add_unmapped_tone(
+                        track_id.to_string(),
+                        family.as_str().to_string(),
+                        tone,
+                    );
+                    song.diagnostics.add_unsupported(
+                        None,
+                        Some(track_id.to_string()),
+                        format!("{}:@{tone}", envelope_name(reference)),
+                        "tone_map: unmapped envelope tone change",
+                    );
+                }
+            }
+            ECommand::RegisterWrite { register, data } => {
+                handle_register_write(
+                    events,
+                    midi_track,
+                    tick,
+                    channel,
+                    track_id,
+                    family,
+                    register.clamp(0, 255) as u8,
+                    data.clamp(0, 255) as u8,
+                    RegisterContext::EnvelopeData,
+                    options,
+                    &mut song.diagnostics,
+                    &source_span,
+                )?;
+            }
+            ECommand::Level(_)
+            | ECommand::Hold { .. }
+            | ECommand::Ramp { .. }
+            | ECommand::Noise(_)
+            | ECommand::ModeChange { .. }
+            | ECommand::FrequencyOffset(_)
+            | ECommand::LoopStart
+            | ECommand::LoopEnd => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_pitch_bend(value: i32) -> u16 {
+    if value < 0 {
+        (value + 8192).clamp(0, 16383) as u16
+    } else {
+        value.clamp(0, 16383) as u16
+    }
+}
+
+fn smf_request_name(request: &SmfRequest) -> String {
+    match request {
+        SmfRequest::Pc { .. } => "pc",
+        SmfRequest::Bank { .. } => "bank",
+        SmfRequest::Cc { .. } => "cc",
+        SmfRequest::PitchBend { .. } => "pb",
+        SmfRequest::Rpn { .. } => "rpn",
+        SmfRequest::Nrpn { .. } => "nrpn",
+        SmfRequest::Marker { .. } => "marker",
+        SmfRequest::Text { .. } => "text",
+        SmfRequest::Macro { .. } => "macro",
+        SmfRequest::Reset { .. } => "reset",
+    }
+    .to_string()
 }
 
 impl RenderedEvent {
@@ -479,12 +1173,23 @@ fn allocate_channels(
     song: &mut SongIr,
     options: &ConversionOptions,
 ) -> Result<Vec<ChannelAssignment>, String> {
-    let reserve_rhythm_channel = song
+    let rhythm_channel = options.smfmap.rhythm_channel.min(15);
+    let mut reserved_channels = Vec::new();
+    if song
         .tracks
         .iter()
-        .any(|track| track.kind == TrackKind::Rhythm);
+        .any(|track| track.kind == TrackKind::Rhythm)
+    {
+        reserved_channels.push(rhythm_channel);
+    }
+    if psg_noise_drum_map_is_active(song, options) {
+        let channel = options.smfmap.psg_noise_drum_channel.min(15);
+        if !reserved_channels.contains(&channel) {
+            reserved_channels.push(channel);
+        }
+    }
     let melodic_channels: Vec<u8> = (0..=15)
-        .filter(|channel| !(reserve_rhythm_channel && *channel == 9))
+        .filter(|channel| !reserved_channels.contains(channel))
         .collect();
     let melodic_count = song
         .tracks
@@ -517,10 +1222,26 @@ fn allocate_channels(
     let mut melodic_index = 0usize;
 
     for track in &song.tracks {
+        if let Some(channel) = options.smfmap.midi_channel_for_track(&track.source_id) {
+            assignments.push(ChannelAssignment {
+                port: options
+                    .smfmap
+                    .midi_port_for_track(&track.source_id)
+                    .unwrap_or(0),
+                channel,
+            });
+            if track.kind == TrackKind::Melodic {
+                melodic_index += 1;
+            }
+            continue;
+        }
         if track.kind == TrackKind::Rhythm {
             assignments.push(ChannelAssignment {
-                port: 0,
-                channel: 9,
+                port: options
+                    .smfmap
+                    .midi_port_for_track(&track.source_id)
+                    .unwrap_or(0),
+                channel: rhythm_channel,
             });
             continue;
         }
@@ -535,6 +1256,18 @@ fn allocate_channels(
     }
 
     Ok(assignments)
+}
+
+fn psg_noise_drum_map_is_active(song: &SongIr, options: &ConversionOptions) -> bool {
+    options.smfmap.psg_noise_enabled
+        && options.smfmap.psg_noise_drum_map_enabled
+        && options.smfmap.psg_noise_default_action == PsgNoiseDefaultAction::DrumMap
+        && song.tracks.iter().any(|track| {
+            options
+                .smfmap
+                .family_for_track(&track.source_id, 0, track.kind)
+                == SourceFamily::PsgNoise
+        })
 }
 
 fn channel_counts(assignments: &[ChannelAssignment]) -> HashMap<(u8, u8), usize> {
@@ -1111,21 +1844,32 @@ fn add_end_of_track_events(events: &mut Vec<RenderedEvent>, track_count: usize) 
     }
 }
 
-fn encode_smf(events: &[RenderedEvent], track_count: usize, ppq: u16) -> Result<Vec<u8>, String> {
+fn encode_smf(
+    events: &[RenderedEvent],
+    track_count: usize,
+    ppq: u16,
+    smf_type: u16,
+) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
+    let smf_type = smf_type.min(1);
+    let output_track_count = if smf_type == 0 { 1 } else { track_count };
     out.extend_from_slice(b"MThd");
     push_u32_be(&mut out, 6);
-    push_u16_be(&mut out, 1);
-    push_u16_be(&mut out, track_count as u16);
+    push_u16_be(&mut out, smf_type);
+    push_u16_be(&mut out, output_track_count as u16);
     push_u16_be(&mut out, ppq);
 
-    for track_index in 0..track_count {
-        let mut track_events: Vec<_> = events
-            .iter()
-            .filter(|event| event.track_index == track_index)
-            .cloned()
-            .collect();
-        track_events.sort_by_key(|event| (event.abs_tick, event.priority));
+    for track_index in 0..output_track_count {
+        let mut track_events: Vec<_> = if smf_type == 0 {
+            events.to_vec()
+        } else {
+            events
+                .iter()
+                .filter(|event| event.track_index == track_index)
+                .cloned()
+                .collect()
+        };
+        track_events.sort_by_key(|event| (event.abs_tick, event.track_index, event.priority));
         let mut track_data = Vec::new();
         let mut last_tick = 0u64;
         for event in track_events {
@@ -1164,6 +1908,11 @@ fn encode_event(out: &mut Vec<u8>, kind: &RenderedEventKind) {
         RenderedEventKind::ProgramChange { channel, program } => {
             out.extend_from_slice(&[0xc0 | (channel & 0x0f), *program])
         }
+        RenderedEventKind::PitchBend { channel, value } => out.extend_from_slice(&[
+            0xe0 | (channel & 0x0f),
+            (value & 0x7f) as u8,
+            ((value >> 7) & 0x7f) as u8,
+        ]),
         RenderedEventKind::Tempo { bpm } => {
             let mpq = 60_000_000u32 / (*bpm).max(1);
             out.extend_from_slice(&[0xff, 0x51, 0x03]);

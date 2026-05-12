@@ -110,6 +110,7 @@ pub struct ConversionOptions {
     pub encoding: EncodingChoice,
     pub octave_base: i32,
     pub strict: bool,
+    pub smfmap: crate::smfmap::SmfMapConfig,
 }
 
 impl Default for ConversionOptions {
@@ -126,6 +127,7 @@ impl Default for ConversionOptions {
             encoding: EncodingChoice::Auto,
             octave_base: 60,
             strict: false,
+            smfmap: crate::smfmap::SmfMapConfig::default(),
         }
     }
 }
@@ -213,9 +215,11 @@ pub struct SongIr {
     pub title: Option<String>,
     pub ppq: u16,
     pub tempo_events: Vec<TempoEvent>,
+    pub conductor_events: Vec<IrEvent>,
     pub tracks: Vec<TrackIr>,
     pub envelopes: EnvelopeTable,
     pub control_texts: BTreeMap<u8, String>,
+    pub opll_tone_assignments: BTreeMap<u8, u8>,
     pub diagnostics: Diagnostics,
 }
 
@@ -225,9 +229,11 @@ impl SongIr {
             title: None,
             ppq,
             tempo_events: Vec::new(),
+            conductor_events: Vec::new(),
             tracks: Vec::new(),
             envelopes: EnvelopeTable::default(),
             control_texts: BTreeMap::new(),
+            opll_tone_assignments: BTreeMap::new(),
             diagnostics: Diagnostics::default(),
         }
     }
@@ -292,13 +298,156 @@ pub enum IrEvent {
         at_steps: Rational,
         kind: LoopMarkerKind,
     },
+    AtCommand {
+        source_track: String,
+        source_step: Rational,
+        family: SourceFamily,
+        number: u8,
+        spelling: AtSpelling,
+        context: AtContext,
+        source_span: SourceSpan,
+    },
+    PsgEnvelopeSelect {
+        source_track: String,
+        source_step: Rational,
+        envelope_number: u8,
+        kind: EnvelopeKind,
+    },
+    ToneChange {
+        source_track: String,
+        source_step: Rational,
+        family: SourceFamily,
+        tone_number: u8,
+    },
+    EnvelopeApply {
+        source_track: String,
+        source_step: Rational,
+        family: SourceFamily,
+        envelope_number: u8,
+        kind: EnvelopeKind,
+    },
+    RegisterWrite {
+        source_track: String,
+        source_step: Rational,
+        family: SourceFamily,
+        register: u8,
+        data: u8,
+        context: RegisterContext,
+        source_span: SourceSpan,
+    },
+    ManualSmf {
+        source_track: Option<String>,
+        target_channel: Option<u8>,
+        source_step: Rational,
+        request: SmfRequest,
+        source_span: SourceSpan,
+    },
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlKind {
     Tone(u8),
     Envelope(EnvelopeRef),
     Text(u8),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum SourceFamily {
+    Psg,
+    PsgNoise,
+    Scc,
+    Opll,
+    Rhythm,
+}
+
+impl SourceFamily {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "psg" => Some(Self::Psg),
+            "psg_noise" => Some(Self::PsgNoise),
+            "scc" => Some(Self::Scc),
+            "opll" => Some(Self::Opll),
+            "rhythm" => Some(Self::Rhythm),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Psg => "psg",
+            Self::PsgNoise => "psg_noise",
+            Self::Scc => "scc",
+            Self::Opll => "opll",
+            Self::Rhythm => "rhythm",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum AtSpelling {
+    At,
+    AtE,
+    AtR,
+}
+
+impl AtSpelling {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::At => "@",
+            Self::AtE => "@e",
+            Self::AtR => "@r",
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtContext {
+    NormalMml,
+    EnvelopeData,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvelopeKind {
+    At,
+    E,
+    R,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum RegisterContext {
+    NormalMml,
+    EnvelopeData,
+}
+
+impl RegisterContext {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NormalMml => "NormalMml",
+            Self::EnvelopeData => "EnvelopeData",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceSpan {
+    pub line: Option<usize>,
+    pub track: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SmfRequest {
+    Pc { program: u8 },
+    Bank { msb: u8, lsb: u8 },
+    Cc { controller: u8, value: u8 },
+    PitchBend { value: i32 },
+    Rpn { msb: u8, lsb: u8, value: u16 },
+    Nrpn { msb: u8, lsb: u8, value: u16 },
+    Marker { text: String },
+    Text { text: String },
+    Macro { name: String },
+    Reset { name: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
