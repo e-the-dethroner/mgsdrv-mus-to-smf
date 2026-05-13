@@ -1,0 +1,77 @@
+version: 0.4.1
+profile_name: placeholder
+
+smf:
+  type: 1
+  ppq: 3600
+  program_numbering: zero_based
+  channel_numbering: zero_based
+
+tracks:
+  "1":
+    source_family: psg
+    midi_channel: 0
+    events:
+      - pc: { program: 80 }
+  "4":
+    source_family: scc
+    midi_channel: 1
+    events:
+      - pc: { program: 81 }
+  "f":
+    source_family: opll
+    render_role: drum
+    drum_map: placeholder_opll_pseudo
+    midi_channel: 9
+
+pitch_glide:
+  enabled: true
+  output: pitch_bend
+  pitch_bend_range_semitones: 24
+  pitch_bend_range_cents: 0
+  emit_rpn_pitch_bend_range: true
+  emit_rpn_null_after_setting: true
+  shared_channel_policy: error
+  range_policy: clamp
+
+psg_envelope_map:
+  enabled: true
+  default:
+    emit_expression_cc: true
+    expression_cc: 11
+
+tone_map:
+  scc:
+    enabled: true
+    tones:
+      "8":
+        name: "SCC placeholder lead"
+        events:
+          - pc: { program: 81 }
+  opll:
+    enabled: true
+    tones: {}
+
+opll_pseudo_drum_map:
+  enabled: true
+  maps:
+    placeholder_opll_pseudo:
+      output:
+        midi_channel: 9
+        mode: replace
+        unmatched: warn_and_drop
+        suppress_tone_map: true
+        suppress_program_change: true
+        note_duration: source_gate
+      hit_grouping:
+        enabled: true
+        suppress_continuations:
+          - macro_continuation
+          - slur_ampersand
+      rules:
+        - name: kick_from_f_c
+          match: { track: "f", note_name: "c" }
+          drum: { note: 36, velocity: source_volume }
+        - name: snare_from_f_d
+          match: { track: "f", note_name: "d" }
+          drum: { note: 38, velocity: source_volume }

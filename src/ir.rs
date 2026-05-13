@@ -358,6 +358,7 @@ pub struct NoteMeta {
 }
 
 impl NoteMeta {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_source_note(
         note_name: char,
         source_octave: i32,

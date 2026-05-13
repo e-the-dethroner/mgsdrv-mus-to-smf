@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="mgs2smf-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$asset"
+          cp target/release/mgs2smf "dist/$asset/"
+          cp README.md README.ja.md CHANGELOG.md LICENSE "dist/$asset/"
+          tar -czf "$asset.tar.gz" -C dist "$asset"
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $asset = "mgs2smf-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$asset" | Out-Null
+          Copy-Item "target/release/mgs2smf.exe" "dist/$asset/"
+          Copy-Item "README.md", "README.ja.md", "CHANGELOG.md", "LICENSE" "dist/$asset/"
+          Compress-Archive -Path "dist/$asset" -DestinationPath "$asset.zip" -Force
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mgs2smf-${{ github.ref_name }}-${{ matrix.target }}
+          path: mgs2smf-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Set release name
+        shell: bash
+        run: echo "RELEASE_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          body_path: CHANGELOG.md
+          files: dist/*

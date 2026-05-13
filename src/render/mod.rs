@@ -9,9 +9,18 @@ use crate::ir::{
     TrackKind,
 };
 use crate::smfmap::{
-    DrumOutputMode, DrumUnmatchedPolicy, DrumVelocity, OpllPseudoDrumContext, OpllPseudoDrumMap,
-    PitchGlideRangePolicy, PitchGlideSharedChannelPolicy, PsgNoiseDefaultAction, RegisterMapPolicy,
-    RenderRole,
+    PitchGlideSharedChannelPolicy, PsgNoiseDefaultAction, RegisterMapPolicy, RenderRole,
+};
+
+mod opll_pseudo_drum;
+mod pitch_glide;
+
+use self::opll_pseudo_drum::{
+    OpllPseudoDrumRenderResult, OpllPseudoDrumRenderState, render_opll_pseudo_drum_note,
+};
+use self::pitch_glide::{
+    collect_pitch_glide_slur_group, effective_pitch_glide_range, emit_pitch_bend_range_setup,
+    render_pitch_glide_curve, render_pitch_glide_group_curve,
 };
 
 const PRI_NOTE_OFF: u8 = 10;
@@ -238,10 +247,14 @@ pub fn collect_midi_events(
         }
     }
 
-    for track_offset in 0..song.tracks.len() {
+    for (track_offset, assignment) in assignments
+        .iter()
+        .copied()
+        .enumerate()
+        .take(song.tracks.len())
+    {
         let track = song.tracks[track_offset].clone();
         let midi_track = track_offset + 1;
-        let assignment = assignments[track_offset];
         let channel = assignment.channel;
         let channel_is_shared = shared_channel_counts
             .get(&(assignment.port, assignment.channel))
@@ -573,45 +586,45 @@ pub fn collect_midi_events(
                         )?;
                     }
 
-                    if track_family == SourceFamily::PsgNoise {
-                        if let Some(drum) = options.smfmap.psg_noise_drum_for_envelope(*envelope) {
-                            let mut drum_velocity = drum.velocity.unwrap_or(note_velocity);
-                            if drum.velocity.is_none() && drum.velocity_from_envelope_peak {
-                                if let Some(reference) = envelope {
-                                    if let Some(value) = first_envelope_value(
-                                        song,
-                                        *reference,
-                                        start_tick,
-                                        duration_ticks,
-                                        &tempo_points,
-                                    ) {
-                                        drum_velocity = scale_velocity(note_velocity, value);
-                                    }
-                                }
-                            }
-                            events.push(RenderedEvent::channel(
-                                midi_track,
+                    if track_family == SourceFamily::PsgNoise
+                        && let Some(drum) = options.smfmap.psg_noise_drum_for_envelope(*envelope)
+                    {
+                        let mut drum_velocity = drum.velocity.unwrap_or(note_velocity);
+                        if drum.velocity.is_none()
+                            && drum.velocity_from_envelope_peak
+                            && let Some(reference) = envelope
+                            && let Some(value) = first_envelope_value(
+                                song,
+                                *reference,
                                 start_tick,
-                                PRI_NOTE_ON,
-                                RenderedEventKind::NoteOn {
-                                    channel: options.smfmap.psg_noise_drum_channel,
-                                    note: drum.note,
-                                    velocity: drum_velocity,
-                                },
-                            ));
-                            events.push(RenderedEvent::channel(
-                                midi_track,
-                                end_tick,
-                                PRI_NOTE_OFF,
-                                RenderedEventKind::NoteOff {
-                                    channel: options.smfmap.psg_noise_drum_channel,
-                                    note: drum.note,
-                                    velocity: 0,
-                                },
-                            ));
-                            note_count += 1;
-                            continue;
+                                duration_ticks,
+                                &tempo_points,
+                            )
+                        {
+                            drum_velocity = scale_velocity(note_velocity, value);
                         }
+                        events.push(RenderedEvent::channel(
+                            midi_track,
+                            start_tick,
+                            PRI_NOTE_ON,
+                            RenderedEventKind::NoteOn {
+                                channel: options.smfmap.psg_noise_drum_channel,
+                                note: drum.note,
+                                velocity: drum_velocity,
+                            },
+                        ));
+                        events.push(RenderedEvent::channel(
+                            midi_track,
+                            end_tick,
+                            PRI_NOTE_OFF,
+                            RenderedEventKind::NoteOff {
+                                channel: options.smfmap.psg_noise_drum_channel,
+                                note: drum.note,
+                                velocity: 0,
+                            },
+                        ));
+                        note_count += 1;
+                        continue;
                     }
 
                     if let Some(reference) = envelope {
@@ -993,217 +1006,7 @@ pub fn collect_midi_events(
     Ok(events)
 }
 
-#[derive(Clone, Copy)]
-struct PitchGlideGroupSegment<'a> {
-    event_index: usize,
-    start_tick: u64,
-    end_tick: u64,
-    note: u8,
-    meta: &'a crate::ir::NoteMeta,
-}
-
-fn collect_pitch_glide_slur_group<'a>(
-    events: &'a [IrEvent],
-    start_index: usize,
-    ppq: u16,
-) -> Option<Vec<PitchGlideGroupSegment<'a>>> {
-    let mut index = start_index;
-    let mut group = Vec::new();
-    let mut has_pitch_glide = false;
-
-    loop {
-        let Some(event) = events.get(index) else {
-            break;
-        };
-        let IrEvent::Note {
-            start_steps,
-            duration_steps,
-            note,
-            meta,
-            ..
-        } = event
-        else {
-            break;
-        };
-        if index != start_index && !meta.slur_from_previous {
-            break;
-        }
-        has_pitch_glide |= meta.pitch_glide.is_some();
-        let start_tick = start_steps.to_midi_ticks(ppq);
-        let end_tick = start_steps.add(*duration_steps).to_midi_ticks(ppq);
-        group.push(PitchGlideGroupSegment {
-            event_index: index,
-            start_tick,
-            end_tick,
-            note: *note,
-            meta,
-        });
-        if !meta.slur_to_next {
-            break;
-        }
-        index += 1;
-    }
-
-    if group.len() > 1 && has_pitch_glide {
-        Some(group)
-    } else {
-        None
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OpllPseudoDrumRenderResult {
-    Replaced,
-    Added,
-    Dropped,
-    Passthrough,
-}
-
-#[derive(Default)]
-struct OpllPseudoDrumRenderState {
-    macro_hit_active: bool,
-}
-
-impl OpllPseudoDrumRenderState {
-    fn reset(&mut self) {
-        self.macro_hit_active = false;
-    }
-
-    fn should_suppress(&mut self, map: &OpllPseudoDrumMap, meta: &crate::ir::NoteMeta) -> bool {
-        if !map.hit_grouping.enabled {
-            return false;
-        }
-        if meta.macro_call_start {
-            self.macro_hit_active = false;
-        }
-        if map.hit_grouping.suppress_slur_ampersand && meta.slur_from_previous {
-            return true;
-        }
-        map.hit_grouping.suppress_macro_continuation
-            && !meta.macro_origin.is_empty()
-            && self.macro_hit_active
-    }
-
-    fn mark_emitted(&mut self, map: &OpllPseudoDrumMap, meta: &crate::ir::NoteMeta) {
-        if map.hit_grouping.enabled && !meta.macro_origin.is_empty() {
-            self.macro_hit_active = true;
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-fn render_opll_pseudo_drum_note(
-    events: &mut Vec<RenderedEvent>,
-    midi_track: usize,
-    start_tick: u64,
-    end_tick: u64,
-    source_track: &str,
-    source_tone: Option<u8>,
-    envelope: Option<EnvelopeRef>,
-    source_midi_note: u8,
-    source_velocity: u8,
-    meta: &crate::ir::NoteMeta,
-    state: &mut OpllPseudoDrumRenderState,
-    map: &OpllPseudoDrumMap,
-    options: &ConversionOptions,
-    song: &mut SongIr,
-) -> OpllPseudoDrumRenderResult {
-    if map.output.mode == DrumOutputMode::Passthrough {
-        return OpllPseudoDrumRenderResult::Passthrough;
-    }
-    if state.should_suppress(map, meta) {
-        return match map.output.mode {
-            DrumOutputMode::Replace => OpllPseudoDrumRenderResult::Dropped,
-            DrumOutputMode::Add | DrumOutputMode::Passthrough => {
-                OpllPseudoDrumRenderResult::Passthrough
-            }
-        };
-    }
-
-    let effective_tone = source_tone.map(|tone| {
-        if options.smfmap.opll_respect_at_hash_rom_assign {
-            song.opll_tone_assignments
-                .get(&tone)
-                .copied()
-                .unwrap_or(tone)
-        } else {
-            tone
-        }
-    });
-    let envelope_number = envelope.map(|reference| match reference {
-        EnvelopeRef::E(id) | EnvelopeRef::R(id) => id,
-    });
-    let macro_symbol = meta.macro_origin.last().and_then(|origin| origin.symbol);
-    let context = OpllPseudoDrumContext {
-        source_track,
-        macro_symbol,
-        envelope: envelope_number,
-        source_tone,
-        effective_tone,
-        note_name: meta.note_name,
-        octave: meta.source_octave,
-        source_midi_note: meta.source_midi_note.or(Some(source_midi_note)),
-    };
-
-    if let Some(rule) = options.smfmap.opll_pseudo_drum_for_note(map, &context) {
-        state.mark_emitted(map, meta);
-        let channel = map
-            .output
-            .midi_channel
-            .unwrap_or(options.smfmap.rhythm_channel)
-            .min(15);
-        let velocity = match rule.drum.velocity {
-            DrumVelocity::SourceVolume | DrumVelocity::SourceOrTone => source_velocity,
-            DrumVelocity::Fixed(value) => value,
-        };
-        events.push(RenderedEvent::channel(
-            midi_track,
-            start_tick,
-            PRI_NOTE_ON,
-            RenderedEventKind::NoteOn {
-                channel,
-                note: rule.drum.note,
-                velocity,
-            },
-        ));
-        events.push(RenderedEvent::channel(
-            midi_track,
-            end_tick,
-            PRI_NOTE_OFF,
-            RenderedEventKind::NoteOff {
-                channel,
-                note: rule.drum.note,
-                velocity: 0,
-            },
-        ));
-        return match map.output.mode {
-            DrumOutputMode::Replace => OpllPseudoDrumRenderResult::Replaced,
-            DrumOutputMode::Add => OpllPseudoDrumRenderResult::Added,
-            DrumOutputMode::Passthrough => OpllPseudoDrumRenderResult::Passthrough,
-        };
-    }
-
-    if matches!(
-        map.output.unmatched,
-        DrumUnmatchedPolicy::WarnAndDrop | DrumUnmatchedPolicy::WarnAndPassthrough
-    ) {
-        song.diagnostics.add_unsupported(
-            None,
-            Some(source_track.to_string()),
-            "opll pseudo drum unmatched note",
-            "opll_pseudo_drum_map unmatched rule",
-        );
-    }
-    match map.output.unmatched {
-        DrumUnmatchedPolicy::WarnAndDrop | DrumUnmatchedPolicy::Drop => {
-            OpllPseudoDrumRenderResult::Dropped
-        }
-        DrumUnmatchedPolicy::Passthrough | DrumUnmatchedPolicy::WarnAndPassthrough => {
-            OpllPseudoDrumRenderResult::Passthrough
-        }
-    }
-}
-
 fn emit_smf_request(
     events: &mut Vec<RenderedEvent>,
     midi_track: usize,
@@ -1403,6 +1206,7 @@ fn emit_smf_request(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_parameter_sequence(
     events: &mut Vec<RenderedEvent>,
     midi_track: usize,
@@ -1436,339 +1240,7 @@ fn emit_parameter_sequence(
     }
 }
 
-fn emit_pitch_bend_range_setup(
-    events: &mut Vec<RenderedEvent>,
-    midi_track: usize,
-    channel: u8,
-    semitones: u8,
-    cents: u8,
-    emit_null: bool,
-) {
-    for (controller, value) in [
-        (101, 0),
-        (100, 0),
-        (6, semitones.min(127)),
-        (38, cents.min(127)),
-    ] {
-        events.push(RenderedEvent::channel(
-            midi_track,
-            0,
-            PRI_RPN_NRPN,
-            RenderedEventKind::ControlChange {
-                channel,
-                controller,
-                value,
-            },
-        ));
-    }
-    if emit_null {
-        for controller in [101, 100] {
-            events.push(RenderedEvent::channel(
-                midi_track,
-                0,
-                PRI_RPN_NRPN,
-                RenderedEventKind::ControlChange {
-                    channel,
-                    controller,
-                    value: 127,
-                },
-            ));
-        }
-    }
-    events.push(RenderedEvent::channel(
-        midi_track,
-        0,
-        PRI_PITCH_BEND,
-        RenderedEventKind::PitchBend {
-            channel,
-            value: 8192,
-        },
-    ));
-}
-
-fn effective_pitch_glide_range(
-    track: &crate::ir::TrackIr,
-    options: &ConversionOptions,
-) -> (u8, u8) {
-    let config = &options.smfmap.pitch_glide;
-    if config.range_policy != PitchGlideRangePolicy::AutoExpandTo48 {
-        return (
-            config.pitch_bend_range_semitones,
-            config.pitch_bend_range_cents,
-        );
-    }
-
-    let configured_cents =
-        config.pitch_bend_range_semitones as i32 * 100 + config.pitch_bend_range_cents as i32;
-    let mut max_delta_cents = track
-        .events
-        .iter()
-        .filter_map(|event| match event {
-            IrEvent::Note { note, meta, .. } => meta
-                .pitch_glide
-                .as_ref()
-                .map(|glide| (glide.target_midi_note as i32 - *note as i32).abs() * 100),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-    for start_index in 0..track.events.len() {
-        let Some(IrEvent::Note { note, meta, .. }) = track.events.get(start_index) else {
-            continue;
-        };
-        if !meta.slur_to_next {
-            continue;
-        }
-        let origin_note = *note as i32;
-        let mut index = start_index;
-        let mut has_pitch_glide = false;
-        while let Some(IrEvent::Note { note, meta, .. }) = track.events.get(index) {
-            if index != start_index && !meta.slur_from_previous {
-                break;
-            }
-            has_pitch_glide |= meta.pitch_glide.is_some();
-            if has_pitch_glide {
-                max_delta_cents = max_delta_cents
-                    .max((*note as i32 - origin_note).abs() * 100)
-                    .max(
-                        meta.pitch_glide
-                            .as_ref()
-                            .map(|glide| (glide.target_midi_note as i32 - origin_note).abs() * 100)
-                            .unwrap_or(0),
-                    );
-            }
-            if !meta.slur_to_next {
-                break;
-            }
-            index += 1;
-        }
-    }
-    if max_delta_cents <= configured_cents {
-        return (
-            config.pitch_bend_range_semitones,
-            config.pitch_bend_range_cents,
-        );
-    }
-    let semitones = ((max_delta_cents + 99) / 100).clamp(1, 48) as u8;
-    (semitones, 0)
-}
-
-fn render_pitch_glide_curve(
-    events: &mut Vec<RenderedEvent>,
-    midi_track: usize,
-    start_tick: u64,
-    end_tick: u64,
-    channel: u8,
-    source_note: u8,
-    glide: &crate::ir::PitchGlideMeta,
-    range_semitones: u8,
-    range_cents: u8,
-    tempo_points: &[(u64, u32)],
-    ppq: u16,
-    track_id: &str,
-    options: &ConversionOptions,
-    diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
-    let total_delta_cents = (glide.target_midi_note as i32 - source_note as i32) * 100;
-    render_pitch_bend_curve_segment(
-        events,
-        midi_track,
-        start_tick,
-        end_tick,
-        channel,
-        0,
-        total_delta_cents,
-        &glide.source,
-        range_semitones,
-        range_cents,
-        tempo_points,
-        ppq,
-        track_id,
-        options,
-        diagnostics,
-    )?;
-    if options.smfmap.pitch_glide.reset.at_note_end {
-        events.push(RenderedEvent::channel(
-            midi_track,
-            end_tick,
-            PRI_PITCH_BEND,
-            RenderedEventKind::PitchBend {
-                channel,
-                value: 8192,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn render_pitch_glide_group_curve(
-    events: &mut Vec<RenderedEvent>,
-    midi_track: usize,
-    channel: u8,
-    group: &[PitchGlideGroupSegment<'_>],
-    range_semitones: u8,
-    range_cents: u8,
-    tempo_points: &[(u64, u32)],
-    ppq: u16,
-    track_id: &str,
-    options: &ConversionOptions,
-    diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
-    let Some(first) = group.first() else {
-        return Ok(());
-    };
-    let origin_note = first.note as i32;
-    for segment in group {
-        let start_cents = (segment.note as i32 - origin_note) * 100;
-        let (target_note, source) = segment
-            .meta
-            .pitch_glide
-            .as_ref()
-            .map(|glide| (glide.target_midi_note, glide.source.as_str()))
-            .unwrap_or((segment.note, "slur pitch segment"));
-        let target_cents = (target_note as i32 - origin_note) * 100;
-        render_pitch_bend_curve_segment(
-            events,
-            midi_track,
-            segment.start_tick,
-            segment.end_tick,
-            channel,
-            start_cents,
-            target_cents,
-            source,
-            range_semitones,
-            range_cents,
-            tempo_points,
-            ppq,
-            track_id,
-            options,
-            diagnostics,
-        )?;
-    }
-    if options.smfmap.pitch_glide.reset.at_note_end {
-        if let Some(last) = group.last() {
-            events.push(RenderedEvent::channel(
-                midi_track,
-                last.end_tick,
-                PRI_PITCH_BEND,
-                RenderedEventKind::PitchBend {
-                    channel,
-                    value: 8192,
-                },
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn render_pitch_bend_curve_segment(
-    events: &mut Vec<RenderedEvent>,
-    midi_track: usize,
-    start_tick: u64,
-    end_tick: u64,
-    channel: u8,
-    start_delta_cents: i32,
-    target_delta_cents: i32,
-    source: &str,
-    range_semitones: u8,
-    range_cents: u8,
-    tempo_points: &[(u64, u32)],
-    ppq: u16,
-    track_id: &str,
-    options: &ConversionOptions,
-    diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
-    let bend_range_cents = (range_semitones.max(1) as i32 * 100 + range_cents as i32).max(1);
-    let max_delta_cents = start_delta_cents.abs().max(target_delta_cents.abs());
-    if max_delta_cents > bend_range_cents {
-        match options.smfmap.pitch_glide.range_policy {
-            PitchGlideRangePolicy::ErrorIfExceeded => {
-                return Err(format!(
-                    "pitch_glide range exceeded on track {track_id}: {} requires {} cents, configured range is {} cents",
-                    source, max_delta_cents, bend_range_cents
-                ));
-            }
-            PitchGlideRangePolicy::Clamp | PitchGlideRangePolicy::AutoExpandTo48 => {
-                diagnostics.add_unsupported(
-                    None,
-                    Some(track_id.to_string()),
-                    source.to_string(),
-                    "pitch_glide: out of range clamped to configured pitch bend range",
-                );
-            }
-        }
-    }
-
-    let duration_ticks = end_tick.saturating_sub(start_tick).max(1);
-    let bpm = tempo_at_tick(tempo_points, start_tick).max(1);
-    let seconds = duration_ticks as f64 * 60.0 / (ppq as f64 * bpm as f64);
-    let event_rate = options.smfmap.pitch_glide.curve.event_rate_hz.max(1) as f64;
-    let steps = (seconds * event_rate).round().max(1.0) as u64;
-    let last_curve_tick = end_tick.saturating_sub(1).max(start_tick);
-    let curve_span = last_curve_tick.saturating_sub(start_tick);
-    let min_delta_cents = options.smfmap.pitch_glide.curve.min_delta_cents as i32;
-    let mut last_emitted_cents: Option<i32> = None;
-    let mut last_event_key: Option<(u64, u16)> = None;
-
-    let start_index = if options.smfmap.pitch_glide.curve.include_start_point {
-        0
-    } else {
-        1
-    };
-    let end_index = if options.smfmap.pitch_glide.curve.include_end_point {
-        steps
-    } else {
-        steps.saturating_sub(1)
-    };
-
-    if options.smfmap.pitch_glide.reset.before_next_note_on
-        && !options.smfmap.pitch_glide.curve.include_start_point
-        && start_delta_cents == 0
-    {
-        events.push(RenderedEvent::channel(
-            midi_track,
-            start_tick,
-            PRI_PITCH_BEND,
-            RenderedEventKind::PitchBend {
-                channel,
-                value: 8192,
-            },
-        ));
-    }
-
-    for index in start_index..=end_index {
-        let cents = start_delta_cents
-            + (((target_delta_cents - start_delta_cents) as i64 * index as i64) / steps as i64)
-                as i32;
-        let is_endpoint = index == 0 || index == steps;
-        if !is_endpoint
-            && let Some(last) = last_emitted_cents
-            && (cents - last).abs() < min_delta_cents
-        {
-            continue;
-        }
-        let tick = start_tick + (curve_span * index / steps);
-        let value = pitch_bend_value_from_cents(cents, bend_range_cents);
-        if last_event_key == Some((tick, value)) {
-            continue;
-        }
-        events.push(RenderedEvent::channel(
-            midi_track,
-            tick,
-            PRI_PITCH_BEND,
-            RenderedEventKind::PitchBend { channel, value },
-        ));
-        last_emitted_cents = Some(cents);
-        last_event_key = Some((tick, value));
-    }
-    Ok(())
-}
-
-fn pitch_bend_value_from_cents(delta_cents: i32, range_cents: i32) -> u16 {
-    let signed = ((delta_cents as f64 / range_cents as f64) * 8192.0).round() as i32;
-    (8192 + signed.clamp(-8192, 8191)).clamp(0, 16383) as u16
-}
-
+#[allow(clippy::too_many_arguments)]
 fn handle_register_write(
     events: &mut Vec<RenderedEvent>,
     midi_track: usize,
@@ -1849,6 +1321,7 @@ fn handle_register_write(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_envelope_side_effects(
     events: &mut Vec<RenderedEvent>,
     midi_track: usize,
@@ -2034,10 +1507,9 @@ fn allocate_channels(
         if let Some(channel) = options
             .smfmap
             .opll_pseudo_drum_channel_for_track(&track.source_id, track.kind)
+            && !reserved_channels.contains(&channel)
         {
-            if !reserved_channels.contains(&channel) {
-                reserved_channels.push(channel);
-            }
+            reserved_channels.push(channel);
         }
     }
     let melodic_channels: Vec<u8> = (0..=15)
@@ -2170,17 +1642,17 @@ fn normalize_tempo_events(song: &mut SongIr) -> Vec<TempoEvent> {
     let mut by_tick: BTreeMap<u64, TempoEvent> = BTreeMap::new();
     for event in song.tempo_events.clone() {
         let tick = event.at_steps.to_midi_ticks(song.ppq);
-        if let Some(existing) = by_tick.get(&tick) {
-            if existing.bpm != event.bpm {
-                song.diagnostics.add_parse_warning(
-                    event.line,
-                    None,
-                    format!(
-                        "conflicting tempo at tick {tick}: {} vs {}; keeping {}",
-                        existing.bpm, event.bpm, event.bpm
-                    ),
-                );
-            }
+        if let Some(existing) = by_tick.get(&tick)
+            && existing.bpm != event.bpm
+        {
+            song.diagnostics.add_parse_warning(
+                event.line,
+                None,
+                format!(
+                    "conflicting tempo at tick {tick}: {} vs {}; keeping {}",
+                    existing.bpm, event.bpm, event.bpm
+                ),
+            );
         }
         by_tick.insert(tick, event);
     }
@@ -2245,12 +1717,12 @@ fn max_count_for_duration(
             ));
             current_tick = next_tick;
         }
-        if let Some((tempo_tick, tempo_bpm)) = tempo_points.get(next_idx).copied() {
-            if tempo_tick == current_tick {
-                bpm = tempo_bpm.max(1);
-                next_idx += 1;
-                continue;
-            }
+        if let Some((tempo_tick, tempo_bpm)) = tempo_points.get(next_idx).copied()
+            && tempo_tick == current_tick
+        {
+            bpm = tempo_bpm.max(1);
+            next_idx += 1;
+            continue;
         }
         if next_tick == end_tick {
             break;
@@ -2335,7 +1807,7 @@ impl TimeFraction {
     }
 
     fn ceil_u32(self) -> u32 {
-        ((self.num + self.den - 1) / self.den).min(u32::MAX as u128) as u32
+        self.num.div_ceil(self.den).min(u32::MAX as u128) as u32
     }
 }
 
@@ -2471,11 +1943,12 @@ fn split_velocity_segments(
             continue;
         }
         let velocity = scale_velocity(base_velocity, value);
-        if let Some(last) = segments.last_mut() {
-            if last.1 == start && last.2 == velocity {
-                last.1 = end;
-                continue;
-            }
+        if let Some(last) = segments.last_mut()
+            && last.1 == start
+            && last.2 == velocity
+        {
+            last.1 = end;
+            continue;
         }
         segments.push((start, end, velocity));
     }

@@ -10,8 +10,11 @@ The binary name is `mgs2smf`.
 
 Documentation:
 
+- [日本語 README](README.ja.md)
 - [`.smfmap.yaml` Guide](docs/smfmap.en.md)
 - [`.smfmap.yaml` 使い方ガイド](docs/smfmap.ja.md)
+- [Release Notes](CHANGELOG.md)
+- [Synthetic examples](examples/README.md)
 
 ```bash
 mgs2smf input.mus -o output.mid \
@@ -63,3 +66,9 @@ bash scripts/validate_compat.sh
 ```
 
 The script converts `tests/compat/*.mus` into `target/compat-smf/*.mid` plus diagnostics JSON for DAW/player checks.
+
+## Release Automation
+
+CI runs on pull requests and pushes to `main` / `master`, checking `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --locked`, and compatibility smoke outputs.
+
+Pushing a tag such as `v0.1.0` builds release binaries for Linux, macOS Intel, and Windows, then publishes a GitHub Release named `0.1.0` with the packaged archives attached.

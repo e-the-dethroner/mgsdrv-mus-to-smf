@@ -659,16 +659,16 @@ impl SmfMapConfig {
         if let Some(enabled) = value.get_key("enabled").and_then(yaml_bool) {
             self.pitch_glide.enabled = enabled;
         }
-        if let Some(output) = value.get_key("output").and_then(yaml_string) {
-            if output != "pitch_bend" {
-                self.pitch_glide.enabled = false;
-            }
+        if let Some(output) = value.get_key("output").and_then(yaml_string)
+            && output != "pitch_bend"
+        {
+            self.pitch_glide.enabled = false;
         }
         if let Some(range) = value
             .get_key("pitch_bend_range_semitones")
             .and_then(yaml_u8)
         {
-            self.pitch_glide.pitch_bend_range_semitones = range.max(1).min(48);
+            self.pitch_glide.pitch_bend_range_semitones = range.clamp(1, 48);
         }
         if let Some(cents) = value.get_key("pitch_bend_range_cents").and_then(yaml_u8) {
             self.pitch_glide.pitch_bend_range_cents = cents.min(99);
@@ -863,19 +863,18 @@ impl SmfMapConfig {
             let Some(Value::Mapping(family_map)) = root.get_str(family_key) else {
                 continue;
             };
-            if let Some(enabled) = family_map.get_str("enabled").and_then(yaml_bool) {
-                if !enabled {
-                    self.tone_map.remove(&family);
-                    continue;
-                }
+            if let Some(enabled) = family_map.get_str("enabled").and_then(yaml_bool)
+                && !enabled
+            {
+                self.tone_map.remove(&family);
+                continue;
             }
-            if family == SourceFamily::Opll {
-                if let Some(respect) = family_map
+            if family == SourceFamily::Opll
+                && let Some(respect) = family_map
                     .get_str("respect_at_hash_rom_assign")
                     .and_then(yaml_bool)
-                {
-                    self.opll_respect_at_hash_rom_assign = respect;
-                }
+            {
+                self.opll_respect_at_hash_rom_assign = respect;
             }
             let Some(Value::Mapping(tones)) = family_map.get_str("tones") else {
                 continue;
@@ -1378,17 +1377,12 @@ impl RegisterRuleMatcher {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 enum StringMatcher {
+    #[default]
     Any,
     One(String),
     Many(BTreeSet<String>),
-}
-
-impl Default for StringMatcher {
-    fn default() -> Self {
-        Self::Any
-    }
 }
 
 impl StringMatcher {
@@ -1429,18 +1423,16 @@ impl StringMatcher {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 enum U8Matcher {
+    #[default]
     Any,
     One(u8),
     Many(BTreeSet<u8>),
-    Range { min: u8, max: u8 },
-}
-
-impl Default for U8Matcher {
-    fn default() -> Self {
-        Self::Any
-    }
+    Range {
+        min: u8,
+        max: u8,
+    },
 }
 
 impl U8Matcher {
@@ -1479,18 +1471,16 @@ impl U8Matcher {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 enum I32Matcher {
+    #[default]
     Any,
     One(i32),
     Many(BTreeSet<i32>),
-    Range { min: i32, max: i32 },
-}
-
-impl Default for I32Matcher {
-    fn default() -> Self {
-        Self::Any
-    }
+    Range {
+        min: i32,
+        max: i32,
+    },
 }
 
 impl I32Matcher {

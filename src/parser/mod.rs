@@ -11,17 +11,20 @@ use crate::ir::{
 };
 use crate::smfmap::Numbering;
 
+type TrackChunk = (
+    String,
+    usize,
+    String,
+    MacroOffsetState,
+    TrackKind,
+    SourceFamily,
+);
+type TrackBodyChunk = (usize, String, MacroOffsetState, TrackKind, SourceFamily);
+
 pub fn parse_source(text: &str, options: &ConversionOptions) -> Result<SongIr, String> {
     let mut song = SongIr::new(options.ppq);
     let mut macros: BTreeMap<u32, String> = BTreeMap::new();
-    let mut track_chunks: Vec<(
-        String,
-        usize,
-        String,
-        MacroOffsetState,
-        TrackKind,
-        SourceFamily,
-    )> = Vec::new();
+    let mut track_chunks: Vec<TrackChunk> = Vec::new();
     let mut top_level_manual_by_track: BTreeMap<String, Vec<IrEvent>> = BTreeMap::new();
     let mut macro_offsets = MacroOffsetState::default();
     let mut opll_mode = 0i32;
@@ -152,17 +155,14 @@ pub fn parse_source(text: &str, options: &ConversionOptions) -> Result<SongIr, S
     }
 
     let mut order = Vec::new();
-    let mut by_track: BTreeMap<
-        String,
-        Vec<(usize, String, MacroOffsetState, TrackKind, SourceFamily)>,
-    > = BTreeMap::new();
+    let mut by_track: BTreeMap<String, Vec<TrackBodyChunk>> = BTreeMap::new();
     let mut kind_by_track: BTreeMap<String, TrackKind> = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for (track, line, body, macro_offset, kind, family) in track_chunks {
-        if let Some(filter) = &play_track_filter {
-            if !filter.contains(&track) {
-                continue;
-            }
+        if let Some(filter) = &play_track_filter
+            && !filter.contains(&track)
+        {
+            continue;
         }
         if seen.insert(track.clone()) {
             order.push(track.clone());
@@ -174,10 +174,10 @@ pub fn parse_source(text: &str, options: &ConversionOptions) -> Result<SongIr, S
             .push((line, body, macro_offset, kind, family));
     }
     for track in top_level_manual_by_track.keys() {
-        if let Some(filter) = &play_track_filter {
-            if !filter.contains(track) {
-                continue;
-            }
+        if let Some(filter) = &play_track_filter
+            && !filter.contains(track)
+        {
+            continue;
         }
         if seen.insert(track.clone()) {
             order.push(track.clone());
@@ -688,19 +688,19 @@ fn parse_macro_definition(
 ) {
     let chars: Vec<char> = line.chars().collect();
     let mut pos = 1;
-    if let Some(id) = parse_u32_chars(&chars, &mut pos) {
-        if let Some(content) = extract_braced(line) {
-            if let Some(effective_id) = apply_macro_offset(id, macro_offset) {
-                macros.insert(effective_id, content);
-            } else {
-                diagnostics.add_parse_warning(
-                    Some(line_no),
-                    None,
-                    format!("macro id out of range after #macro_offset: *{id} + {macro_offset}"),
-                );
-            }
-            return;
+    if let Some(id) = parse_u32_chars(&chars, &mut pos)
+        && let Some(content) = extract_braced(line)
+    {
+        if let Some(effective_id) = apply_macro_offset(id, macro_offset) {
+            macros.insert(effective_id, content);
+        } else {
+            diagnostics.add_parse_warning(
+                Some(line_no),
+                None,
+                format!("macro id out of range after #macro_offset: *{id} + {macro_offset}"),
+            );
         }
+        return;
     }
     diagnostics.add_parse_warning(Some(line_no), None, "invalid macro definition");
 }
@@ -1968,22 +1968,21 @@ fn extend_last_note_if_same(
 
 fn parse_volume(chars: &[char], pos: &mut usize, state: &mut MmlState, ctx: &mut MmlContext<'_>) {
     *pos += 1;
-    if ctx.track_kind == TrackKind::Rhythm {
-        if let Some(instrument) = chars.get(*pos).copied().map(|ch| ch.to_ascii_lowercase()) {
-            if rhythm_drum_note(instrument).is_some() {
-                *pos += 1;
-                if let Some(value) = parse_i32_chars(chars, pos) {
-                    state.rhythm_volumes.insert(instrument, value.clamp(0, 15));
-                } else {
-                    ctx.diagnostics.add_parse_warning(
-                        Some(ctx.line),
-                        Some(ctx.track_id.to_string()),
-                        "rhythm v command without value",
-                    );
-                }
-                return;
-            }
+    if ctx.track_kind == TrackKind::Rhythm
+        && let Some(instrument) = chars.get(*pos).copied().map(|ch| ch.to_ascii_lowercase())
+        && rhythm_drum_note(instrument).is_some()
+    {
+        *pos += 1;
+        if let Some(value) = parse_i32_chars(chars, pos) {
+            state.rhythm_volumes.insert(instrument, value.clamp(0, 15));
+        } else {
+            ctx.diagnostics.add_parse_warning(
+                Some(ctx.line),
+                Some(ctx.track_id.to_string()),
+                "rhythm v command without value",
+            );
         }
+        return;
     }
     match chars.get(*pos) {
         Some('+') => {
@@ -2574,9 +2573,10 @@ fn unsupported_mml_policy(command: &str) -> &'static str {
         "ignore_with_warning: FM sustain not rendered"
     } else if lower == "ko" || lower == "kf" {
         "ignore_with_warning: keyoff command ignored"
-    } else if matches!(lower.as_str(), "ho" | "hf" | "hi") || lower.starts_with('h') {
-        "ignore_with_warning: LFO not rendered"
-    } else if lower.starts_with("@p") {
+    } else if matches!(lower.as_str(), "ho" | "hf" | "hi")
+        || lower.starts_with('h')
+        || lower.starts_with("@p")
+    {
         "ignore_with_warning: LFO not rendered"
     } else if lower.starts_with("@l") {
         "ignore_with_warning: FM total level not rendered"

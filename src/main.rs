@@ -324,15 +324,15 @@ fn load_smfmap_configs(cli: &mut Cli) -> Result<Vec<String>, String> {
         cli.options.smfmap.merge_file(&path)?;
         loaded.push(path.display().to_string());
     }
-    if cli.ppq_override.is_none() {
-        if let Some(ppq) = cli.options.smfmap.smf_ppq {
-            cli.options.ppq = ppq;
-        }
+    if cli.ppq_override.is_none()
+        && let Some(ppq) = cli.options.smfmap.smf_ppq
+    {
+        cli.options.ppq = ppq;
     }
-    if cli.channel_overflow_override.is_none() {
-        if let Some(policy) = cli.options.smfmap.channel_overflow {
-            cli.options.channel_overflow = policy;
-        }
+    if cli.channel_overflow_override.is_none()
+        && let Some(policy) = cli.options.smfmap.channel_overflow
+    {
+        cli.options.channel_overflow = policy;
     }
     if let Some(numbering) = cli.program_numbering_override {
         cli.options.smfmap.program_numbering = numbering;

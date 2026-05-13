@@ -1,0 +1,13 @@
+; Synthetic placeholder for mgs2smf examples.
+; This file is original test material, not a transcription of an existing song.
+
+#opll_mode 0
+#title "smfmap placeholder"
+#tempo 120
+
+@e1 = {1,0,f:4,c:4,8:8,4:8}
+@e2 = {1,0,f:2,c:2,8:4,4:4}
+
+1 @e1 o4 v13 l8 c d e g r4 c e g
+4 @8 @e2 o5 v12 l8 c_d4&d_c4 r4 g e c
+f o2 v15 l8 c r d r c d r r
